@@ -1,0 +1,256 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+import os
+import sys
+import glob
+import re
+import json
+import io
+from urllib.parse import quote, urljoin
+
+try:
+    from curl_cffi import requests
+except ImportError:
+    for pattern in ['/usr/local/lib/python*/dist-packages', '/usr/lib/python*/dist-packages', '/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages']:
+        for p in glob.glob(pattern):
+            if p not in sys.path:
+                sys.path.append(p)
+    try:
+        from curl_cffi import requests
+    except ImportError:
+        import requests
+
+from calibre.web.feeds.news import BasicNewsRecipe
+from PIL import Image
+
+
+class FeedMod04(BasicNewsRecipe):
+    title = 'Le Figaro'
+    timefmt = ' - %d/%m %Hh%M'
+    __author__ = 'Custom Local'
+    description = 'Data feed 04'
+    publisher = 'Le Figaro'
+    publication_type = 'newspaper'
+    language = 'fr'
+    encoding = 'utf-8'
+
+    oldest_article = 1.5
+    max_articles_per_feed = 30
+    no_stylesheets = True
+    remove_attributes = ['style', 'height', 'width']
+    ignore_duplicate_articles = {'title', 'url'}
+    auto_cleanup = False
+    delay = 1.0
+
+    compress_news_images = False
+    scale_news_images_to_device = False
+    scale_news_images = None
+
+    extra_css = '''
+        body { font-size: 1em; line-height: 1.4; margin: 0; padding: 0; }
+        h1, h1.calibre_title, .article-title, .title { font-size: 1.2em !important; font-weight: bold; line-height: 1.2; margin-top: 0.2em; margin-bottom: 0.6em; text-align: left; }
+        h2 { font-size: 1.1em; font-weight: bold; margin-top: 0.9em; margin-bottom: 0.4em; }
+        h3 { font-size: 1.05em; font-weight: bold; margin-top: 0.8em; margin-bottom: 0.4em; }
+        p { font-size: 0.95em; line-height: 1.4; text-align: justify; margin-top: 0; margin-bottom: 0.8em; }
+        figure, div.figure { margin: 0.6em 0; padding: 0; text-align: center; }
+        figure div, figure p { margin: 0; padding: 0; }
+        img { display: block; margin: 0.4em auto; width: 80%; max-width: 100%; height: auto; }
+        figcaption, .caption { display: block; margin-top: 0.2em; font-size: 0.8em; line-height: 1.25; color: #555; font-style: italic; text-align: center; }
+    '''
+
+    feeds = [
+        ('À la une', 'https://www.lefigaro.fr/rss/figaro_actualites.xml'),
+        ('Politique', 'https://www.lefigaro.fr/rss/figaro_politique.xml'),
+        ('International', 'https://www.lefigaro.fr/rss/figaro_international.xml'),
+        ('Économie', 'https://www.lefigaro.fr/rss/figaro_economie.xml'),
+        ('Société', 'https://www.lefigaro.fr/rss/figaro_actualite-france.xml'),
+        ('Culture', 'https://www.lefigaro.fr/rss/figaro_culture.xml'),
+    ]
+
+    def get_browser(self, *args, **kwargs):
+        kwargs['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        br = BasicNewsRecipe.get_browser(self, *args, **kwargs)
+        return br
+
+    def parse_index(self):
+        import xml.etree.ElementTree as ET
+
+        parsed_feeds = []
+        for feed_title, feed_url in self.feeds:
+            self.report_progress(0, f"Fetching feed: {feed_title} via curl_cffi...")
+            try:
+                r = requests.get(feed_url, impersonate="chrome120", timeout=15)
+                if r.status_code != 200:
+                    continue
+
+                root = ET.fromstring(r.content)
+                articles = []
+                for item in root.findall('.//item'):
+                    title_tag = item.find('title')
+                    link_tag = item.find('link')
+                    desc_tag = item.find('description')
+
+                    if title_tag is None or link_tag is None:
+                        continue
+
+                    title = title_tag.text.strip() if title_tag.text else ""
+                    url = link_tag.text.strip() if link_tag.text else ""
+                    description = desc_tag.text.strip() if (desc_tag is not None and desc_tag.text) else ""
+
+                    title_upper = title.upper()
+                    if title_upper.startswith(('EN DIRECT', 'DIRECT', '[EN DIRECT]', 'LIVE')) or 'EN DIRECT' in title_upper or 'DIRECT :' in title_upper:
+                        self.report_progress(0, f"Ignoré (EN DIRECT): {title}")
+                        continue
+
+                    if url:
+                        articles.append({
+                            'title': title,
+                            'url': url,
+                            'description': description,
+                            'date': ''
+                        })
+
+                if articles:
+                    parsed_feeds.append((feed_title, articles))
+            except Exception as e:
+                self.report_progress(0, f"Error parsing feed {feed_title}: {e}")
+
+        return parsed_feeds
+
+    def _fetch_article(self, url, dir_, f, a, num_of_feeds, preloaded=None):
+        from calibre.ebooks.BeautifulSoup import BeautifulSoup
+
+        self.report_progress(0, f"Downloading Le Figaro article via GraphQL API: {url}")
+        article_file = os.path.join(dir_, 'index.html')
+
+        try:
+            clean_url = url.split('?')[0].split('#')[0]
+            resource_key = '34e68a3419a876e36729503e2107dfa556e1a105892e27010130a30018ccbe60'
+            var_json = json.dumps({"url": clean_url})
+            graphql_url = f"https://api-graphql.lefigaro.fr/graphql?id=FigaroCoreMobile_resourceByUrl_persistent_{resource_key}&variables={quote(var_json)}"
+
+            r = requests.get(graphql_url, impersonate="chrome120", timeout=15)
+            html_content = ""
+
+            fallback_title = ''
+            try:
+                art_item = self.feeds[f][1][a]
+                if isinstance(art_item, dict):
+                    fallback_title = art_item.get('title', '').strip()
+                elif hasattr(art_item, 'title'):
+                    fallback_title = str(art_item.title).strip()
+            except Exception:
+                fallback_title = ''
+
+            article_title = fallback_title if fallback_title else 'Article Le Figaro'
+            chapeau = ""
+
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    res = data.get('data', {}).get('resource', {}) or {}
+
+                    gql_title = (
+                        res.get('headline') or
+                        res.get('pageTitle') or
+                        res.get('seoTitle') or
+                        (res.get('headlines', {}).get('basic') if isinstance(res.get('headlines'), dict) else None) or
+                        res.get('title')
+                    )
+                    if gql_title and isinstance(gql_title, str) and gql_title.strip() and gql_title.strip() != 'Le Figaro':
+                        article_title = gql_title.strip()
+
+                    chapeau = res.get('standfirst', '') or res.get('description', '')
+
+                    pars = res.get('body', {}).get('structured', []) or []
+                    blocks = []
+                    img_index = 0
+
+                    for par in pars:
+                        if not isinstance(par, dict):
+                            continue
+                        par_type = par.get('__typename', '')
+
+                        if par_type in ['Heading', 'Paragraph', 'ParagraphWithPaywall']:
+                            p_data = par.get('paywall') if (isinstance(par, dict) and par.get('paywall')) else par
+                            text = p_data.get('text', '') if isinstance(p_data, dict) else ''
+                            text = text.replace('&nbsp;', ' ')
+                            if text.strip():
+                                if par_type == 'Heading':
+                                    blocks.append(f"<h3 style='font-size:1.2em; font-weight:bold; margin-top:1em;'>{text}</h3>")
+                                else:
+                                    blocks.append(f"<p>{text}</p>")
+
+                        elif par_type in ['Photo', 'VideoFigaro']:
+                            p_data = par.get('thumbnail') if par.get('thumbnail') else par
+                            img_obj = p_data.get('image', {}) if isinstance(p_data, dict) else {}
+                            img_url = img_obj.get('url', '')
+                            if img_url:
+                                caption = p_data.get('caption', '') or ''
+                                caption = re.sub(r'<[^<]*>', '', caption)
+                                credit = p_data.get('credit', '') or ''
+                                leg = f"{caption} {credit}".strip()
+
+                                try:
+                                    img_r = requests.get(img_url, impersonate="chrome120", timeout=10)
+                                    if img_r.status_code == 200:
+                                        im = Image.open(io.BytesIO(img_r.content))
+                                        im.thumbnail((800, 600), Image.Resampling.LANCZOS)
+                                        if im.mode in ('RGBA', 'P'):
+                                            im = im.convert('RGB')
+
+                                        img_filename = f"fig_img_{img_index}.jpg"
+                                        img_path = os.path.join(dir_, img_filename)
+                                        im.save(img_path, 'JPEG', quality=75, optimize=True)
+
+                                        blocks.append(f"<figure style='text-align:center;'><img src='{img_filename}'/><figcaption style='font-size:0.8em; color:#666;'>{leg}</figcaption></figure>")
+                                        img_index += 1
+                                except Exception as img_err:
+                                    self.report_progress(0, f"Erreur image Figaro {img_url}: {img_err}")
+
+                        elif par_type == 'Frame':
+                            ftitle = par.get('title', '')
+                            ftext = par.get('text', '')
+                            if ftext or ftitle:
+                                blocks.append(f"<blockquote style='background:#f9f9f9; padding:10px; border-left:3px solid #ccc;'><strong>{ftitle}</strong><p>{ftext}</p></blockquote>")
+
+                        elif par_type == 'Quote':
+                            qtext = par.get('text', '')
+                            qcredit = par.get('credit', '')
+                            if qtext:
+                                blocks.append(f"<blockquote style='font-style:italic; font-size:1.1em;'>« {qtext} » <br/><small>{qcredit}</small></blockquote>")
+
+                        elif par_type == 'List':
+                            items = par.get('list', [])
+                            if items:
+                                li_html = "".join([f"<li>{item}</li>" for item in items])
+                                blocks.append(f"<ul>{li_html}</ul>")
+
+                        elif par_type == 'HorizontalRule':
+                            blocks.append("<hr/>")
+
+                    html_content = "".join(blocks)
+                except Exception as json_err:
+                    self.report_progress(0, f"Erreur JSON GraphQL Figaro: {json_err}")
+
+            if html_content:
+                chapeau_html = f"<p style='font-weight:bold; font-style:italic; margin-bottom:1.5em;'>{chapeau}</p>" if chapeau else ""
+                final_html = f"<html><head><title>{article_title}</title></head><body><article><h1 style='font-size:1.5em; font-weight:bold;'>{article_title}</h1>{chapeau_html}<div>{html_content}</div></article></body></html>"
+
+                soup = BeautifulSoup(final_html)
+                soup = self.preprocess_html(soup)
+
+                with open(article_file, 'wb') as file_obj:
+                    file_obj.write(str(soup).encode('utf-8'))
+                return (article_file, [article_file], [])
+        except Exception as e:
+            self.report_progress(0, f"Erreur globale téléchargement Figaro {url}: {e}")
+
+        return BasicNewsRecipe._fetch_article(self, url, dir_, f, a, num_of_feeds, preloaded)
+
+    def preprocess_html(self, soup):
+        for tag in list(soup.find_all(['script', 'style', 'iframe', 'noscript'])):
+            tag.decompose()
+        for a in list(soup.find_all('a')):
+            a.unwrap()
+        return soup

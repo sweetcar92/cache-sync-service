@@ -1,0 +1,88 @@
+name: Data Sync Pipeline
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [trigger-build]
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install System Dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends calibre
+          sudo wget -q https://github.com/pgaskin/kepubify/releases/latest/download/kepubify-linux-64bit -O /usr/local/bin/kepubify
+          sudo chmod +x /usr/local/bin/kepubify
+
+      - name: Install Python Dependencies
+        run: |
+          sudo apt-get install -y python3-pip
+          sudo python3 -m pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib requests curl_cffi Pillow html5_parser
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib requests curl_cffi Pillow html5_parser
+
+      - name: Generate Datasets
+        env:
+          TZ: "Europe/Paris"
+        run: |
+          DATE_FILE=$(date +'%Y-%m-%d_%Hh%M')
+
+          MONDE_FILE="Le_Monde_${DATE_FILE}.epub"
+          PARISIEN_FILE="Le_Parisien_${DATE_FILE}.epub"
+          ECHOS_FILE="Les_Echos_${DATE_FILE}.epub"
+          FIGARO_FILE="Le_Figaro_${DATE_FILE}.epub"
+          WAPO_FILE="Washington_Post_${DATE_FILE}.epub"
+          COURRIER_FILE="Courrier_International_${DATE_FILE}.epub"
+
+          echo "DATE_FILE=$DATE_FILE" >> $GITHUB_ENV
+          echo "MONDE_FILE=$MONDE_FILE" >> $GITHUB_ENV
+          echo "PARISIEN_FILE=$PARISIEN_FILE" >> $GITHUB_ENV
+          echo "ECHOS_FILE=$ECHOS_FILE" >> $GITHUB_ENV
+          echo "FIGARO_FILE=$FIGARO_FILE" >> $GITHUB_ENV
+          echo "WAPO_FILE=$WAPO_FILE" >> $GITHUB_ENV
+          echo "COURRIER_FILE=$COURRIER_FILE" >> $GITHUB_ENV
+
+          echo "=== Génération Le Monde ==="
+          ebook-convert r_mod_01.recipe "$MONDE_FILE" || echo "⚠️ Le Monde failed"
+
+          echo "=== Génération Le Parisien ==="
+          ebook-convert r_mod_02.recipe "$PARISIEN_FILE" || echo "⚠️ Le Parisien failed"
+
+          echo "=== Génération Les Echos ==="
+          ebook-convert r_mod_03.recipe "$ECHOS_FILE" || echo "⚠️ Les Echos failed"
+
+          echo "=== Génération Le Figaro ==="
+          ebook-convert r_mod_04.recipe "$FIGARO_FILE" || echo "⚠️ Le Figaro failed"
+
+          echo "=== Génération Washington Post ==="
+          ebook-convert r_mod_05.recipe "$WAPO_FILE" || echo "⚠️ Washington Post failed"
+
+          echo "=== Génération Courrier International ==="
+          ebook-convert r_mod_06.recipe "$COURRIER_FILE" || echo "⚠️ Courrier International failed"
+
+      - name: Convert Outputs
+        run: |
+          kepubify --inplace *.epub
+          echo "=== Datasets Ready ==="
+          ls -lh *.epub
+
+      - name: Sync Outputs to External Storage
+        run: |
+          GDRIVE_FOLDER_ID="1fonLAb_c2_2ax6EAIpvZnNlrHGK_cqsY" \
+          GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
+          GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
+          GOOGLE_REFRESH_TOKEN="${{ secrets.GOOGLE_REFRESH_TOKEN }}" \
+          TARGET_FILES="${{ env.MONDE_FILE }},${{ env.PARISIEN_FILE }},${{ env.ECHOS_FILE }},${{ env.FIGARO_FILE }},${{ env.WAPO_FILE }},${{ env.COURRIER_FILE }}" \
+          python drive_sync.py

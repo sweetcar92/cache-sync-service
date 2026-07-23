@@ -1,0 +1,295 @@
+import sys
+import os
+import glob
+
+try:
+    from curl_cffi import requests
+except ImportError:
+    for pattern in ['/usr/local/lib/python*/dist-packages', '/usr/lib/python*/dist-packages', '/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages']:
+        for p in glob.glob(pattern):
+            if p not in sys.path:
+                sys.path.append(p)
+    try:
+        from curl_cffi import requests
+    except ImportError:
+        import requests
+
+from calibre.web.feeds.news import BasicNewsRecipe
+
+
+class FeedMod03(BasicNewsRecipe):
+    title                  = 'Les Echos'
+    timefmt                = ' - %d/%m %Hh%M'
+    oldest_article         = 7
+    max_articles_per_feed  = 30
+    auto_cleanup           = False
+    language               = 'fr'
+    remove_attributes      = ['style', 'height', 'width']
+    calibre_most_common_ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    delay                  = 1.5
+    simultaneous_downloads = 2
+    compress_news_images = False
+    scale_news_images_to_device = False
+    scale_news_images = None
+
+    extra_css = '''
+        body { font-size: 1em; line-height: 1.4; margin: 0; padding: 0; }
+        h1, h1.calibre_title, .article-title, .title, header h1, header h2 { font-size: 1.1em !important; font-weight: bold !important; line-height: 1.2 !important; margin-top: 0.2em !important; margin-bottom: 0.6em !important; text-align: left !important; }
+        h2 { font-size: 1.05em !important; font-weight: bold !important; margin-top: 0.8em !important; margin-bottom: 0.4em !important; }
+        h3 { font-size: 1.0em !important; font-weight: bold !important; margin-top: 0.7em !important; margin-bottom: 0.3em !important; }
+        p { font-size: 0.95em; line-height: 1.4; text-align: justify; margin-top: 0; margin-bottom: 0.8em; }
+        figure, div.figure { margin: 0.6em 0; padding: 0; text-align: center; }
+        figure div, figure p { margin: 0; padding: 0; }
+        img { display: block; margin: 0.4em auto; width: 80%; max-width: 100%; height: auto; }
+        figcaption, .caption { display: block; margin-top: 0.2em; font-size: 0.8em; line-height: 1.25; color: #555; font-style: italic; text-align: center; }
+    '''
+
+    keep_only_tags = [
+        dict(name='article'),
+        dict(name='div', attrs={'class': 'post-content'}),
+        dict(name='div', attrs={'id': 'post-body'})
+    ]
+
+    def parse_index(self):
+        import xml.etree.ElementTree as ET
+
+        parsed_feeds = []
+        for feed_title, feed_url in self.feeds:
+            self.report_progress(0, f"Fetching feed: {feed_title} via curl_cffi...")
+            try:
+                r = requests.get(feed_url, impersonate="chrome120", timeout=15)
+                if r.status_code != 200:
+                    self.report_progress(0, f"Failed to fetch feed {feed_title}: status {r.status_code}")
+                    continue
+
+                root = ET.fromstring(r.content)
+                articles = []
+
+                for item in root.findall('.//item'):
+                    title_tag = item.find('title')
+                    link_tag = item.find('link')
+                    desc_tag = item.find('description')
+
+                    if title_tag is None or link_tag is None:
+                        continue
+
+                    title = title_tag.text.strip() if title_tag.text else ""
+                    url = link_tag.text.strip() if link_tag.text else ""
+                    description = desc_tag.text.strip() if (desc_tag is not None and desc_tag.text) else ""
+
+                    t_upper = title.upper()
+                    if t_upper.startswith(('EN DIRECT', 'DIRECT', '[EN DIRECT]', 'LIVE')) or 'EN DIRECT' in t_upper or 'DIRECT :' in t_upper:
+                        self.report_progress(0, f"Ignoré (EN DIRECT): {title}")
+                        continue
+
+                    if url:
+                        articles.append({
+                            'title': title,
+                            'url': url,
+                            'description': description,
+                            'date': ''
+                        })
+
+                if articles:
+                    parsed_feeds.append((feed_title, articles))
+                    self.report_progress(0, f"Found {len(articles)} valid articles in {feed_title}")
+            except Exception as e:
+                self.report_progress(0, f"Error parsing feed {feed_title}: {str(e)}")
+
+        return parsed_feeds
+
+    def _fetch_article(self, url, dir_, f, a, num_of_feeds, preloaded=None):
+        from calibre.ebooks.BeautifulSoup import BeautifulSoup
+        from urllib.parse import urljoin
+        import json
+        import re
+        import os
+
+        self.report_progress(0, f"Downloading article page via curl_cffi (_fetch_article): {url}")
+        article_file = os.path.join(dir_, 'index.html')
+
+        try:
+            r = requests.get(url, impersonate="chrome120", timeout=15)
+            if r.status_code != 200:
+                self.report_progress(0, f"Failed to download article {url} (HTTP {r.status_code})")
+                return BasicNewsRecipe._fetch_article(self, url, dir_, f, a, num_of_feeds, preloaded)
+
+            soup = BeautifulSoup(r.content)
+            extracted_html = None
+
+            for script in soup.findAll('script'):
+                if script.string and 'window.__REACT_QUERY_STATE__' in script.string:
+                    self.report_progress(0, "Found __REACT_QUERY_STATE__ in page source. Extracting content...")
+                    parts = re.split(r'window\.__REACT_QUERY_STATE__\s?=\s?', script.string)
+                    if len(parts) >= 2:
+                        json_str = parts[1].split('};')[0].strip()
+                        if not json_str.endswith('}'):
+                            json_str += '}'
+
+                        try:
+                            data = json.loads(json_str)
+                            for query in data.get('queries', []):
+                                state = query.get('state', {}) or {}
+                                qdata = state.get('data', {}) or {}
+                                if not isinstance(qdata, dict):
+                                    continue
+                                if 'stripes' in qdata and qdata['stripes']:
+                                    stripes = qdata['stripes']
+                                    first_stripe = stripes[0]
+                                    text_blocks = []
+                                    for block in first_stripe.get('mainContent', []):
+                                        block_data = block.get('data', {}) or {}
+                                        if 'description' in block_data and block_data['description']:
+                                            text_blocks.append(block_data['description'])
+
+                                    if text_blocks:
+                                        extracted_html = "".join(text_blocks)
+                                        self.report_progress(0, f"Successfully extracted article ({len(text_blocks)} blocks from stripe[0])!")
+                                        break
+                        except Exception as json_err:
+                            self.report_progress(0, f"Error parsing React query JSON: {str(json_err)}")
+
+            if extracted_html:
+                content_soup = BeautifulSoup(extracted_html)
+                img_index = 0
+                for img in content_soup.find_all('img'):
+                    src = (
+                        img.get('data-src') or
+                        img.get('data-lazy-src') or
+                        img.get('data-original') or
+                        img.get('src') or
+                        ''
+                    )
+
+                    if not src:
+                        srcset = img.get('srcset') or img.get('data-srcset') or ''
+                        if srcset:
+                            src = srcset.split(',')[0].strip().split(' ')[0]
+
+                    if not src or src.startswith('data:'):
+                        continue
+
+                    img_url = urljoin(url, src)
+
+                    self.report_progress(0, f"Downloading article image via curl_cffi: {img_url}")
+                    try:
+                        img_r = requests.get(img_url, impersonate="chrome120", timeout=15)
+
+                        if img_r.status_code == 200:
+                            ext = '.jpg'
+                            if '.png' in img_url.lower():
+                                ext = '.png'
+                            elif '.webp' in img_url.lower():
+                                ext = '.webp'
+                            elif '.gif' in img_url.lower():
+                                ext = '.gif'
+
+                            img_filename = f"image_{img_index}{ext}"
+                            img_path = os.path.join(dir_, img_filename)
+
+                            with open(img_path, 'wb') as img_f:
+                                img_f.write(img_r.content)
+
+                            img['src'] = img_filename
+                            img_index += 1
+                            self.report_progress(0, f"Successfully saved image to {img_filename}")
+                        else:
+                            self.report_progress(0, f"Failed to download image {img_url} (HTTP {img_r.status_code})")
+                    except Exception as img_err:
+                        self.report_progress(0, f"Error downloading image {img_url}: {str(img_err)}")
+
+                content_soup = self.preprocess_html(content_soup)
+                extracted_html = str(content_soup)
+
+            if extracted_html:
+                title_tag = soup.find('h1')
+                title_text = title_tag.get_text().strip() if title_tag else ""
+                title_html = f'<h1 class="article-title" style="font-size:1.1em !important; font-weight:bold !important; line-height:1.2 !important; margin-top:0.2em !important; margin-bottom:0.6em !important;">{title_text}</h1>' if title_text else ""
+                final_html = f"<html><body><article>{title_html}<div>{extracted_html}</div></article></body></html>"
+                with open(article_file, 'wb') as file_obj:
+                    file_obj.write(final_html.encode('utf-8'))
+            else:
+                self.report_progress(0, f"Writing raw HTML as fallback for {url}")
+                with open(article_file, 'wb') as file_obj:
+                    file_obj.write(r.content)
+
+            return (article_file, [article_file], [])
+
+        except Exception as e:
+            self.report_progress(0, f"Error downloading article {url}: {str(e)}")
+
+        return BasicNewsRecipe._fetch_article(self, url, dir_, f, a, num_of_feeds, preloaded)
+
+    def preprocess_html(self, soup):
+        for tag in list(soup.find_all(['script', 'style', 'noscript', 'iframe'])):
+            tag.decompose()
+
+        for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'header']):
+            for attr in ['style', 'font-size', 'class']:
+                if h.has_attr(attr):
+                    del h[attr]
+
+        for tag in list(soup.find_all(True)):
+            if not tag.parent:
+                continue
+            classes = tag.get('class', [])
+            tag_id = tag.get('id', '')
+            if isinstance(classes, str):
+                classes = [classes]
+            bad_keywords = [
+                'read-also', 'lire-aussi', 'lire-egalement', 'related', 'relations', 
+                'share', 'social', 'newsletter', 'pub', 'ad-', 'advertisement', 
+                'promo', 'widget', 'reactions', 'comment', 'sidebar', 'footer', 
+                'header', 'menu', 'banner', 'nav', 'recom', 'paywall-block'
+            ]
+            if any(any(kw in c.lower() for kw in bad_keywords) for c in classes) or \
+               any(kw in tag_id.lower() for kw in bad_keywords):
+                tag.decompose()
+
+        for p in list(soup.find_all(['p', 'div', 'span', 'strong', 'h2', 'h3', 'h4', 'li'])):
+            if not p.parent:
+                continue
+            text = p.get_text().strip().lower()
+            if text.startswith((
+                'lire aussi', 'lire également', 'lire sur le même sujet',
+                'a lire aussi', 'sur le même sujet', 'voir aussi', 'lire en continu',
+                'édito -', 'edito -'
+            )) or text == 'lire aussi :' or 'lire aussi' in text or 'lire également' in text:
+                sibling = p.next_sibling
+                siblings_to_delete = []
+                while sibling:
+                    if not hasattr(sibling, 'name'):
+                        sibling = sibling.next_sibling
+                        continue
+                    if sibling.name in ['p', 'div', 'span', 'ul', 'li', 'a']:
+                        has_link = sibling.find('a') or sibling.name == 'a'
+                        if has_link or sibling.get_text().strip().lower().startswith(('edito -', 'édito -')):
+                            sibling_text = sibling.get_text().strip()
+                            links_text = "".join([anchor.get_text().strip() for anchor in sibling.find_all('a')]) if sibling.name != 'a' else sibling_text
+                            if not has_link or len(sibling_text) - len(links_text) < 25:
+                                siblings_to_delete.append(sibling)
+                                sibling = sibling.next_sibling
+                                continue
+                    break
+                for s in siblings_to_delete:
+                    s.decompose()
+                p.decompose()
+
+        for p in list(soup.find_all(['p', 'div', 'span', 'strong', 'h2', 'h3', 'h4', 'li'])):
+            if p.parent:
+                text = p.get_text().strip().lower()
+                if text.startswith(('edito -', 'édito -', 'lire aussi', 'lire également')) or text == 'lire aussi :' or text.startswith('lire aussi'):
+                    p.decompose()
+
+        for a in list(soup.find_all('a')):
+            a.unwrap()
+
+        return soup
+
+    feeds = [
+        ('Économie', 'https://services.lesechos.fr/rss/les-echos-economie.xml'),
+        ('Finance & Marchés', 'https://services.lesechos.fr/rss/les-echos-finance-marches.xml'),
+        ('Politique', 'https://services.lesechos.fr/rss/les-echos-politique.xml'),
+        ('Monde', 'https://services.lesechos.fr/rss/les-echos-monde.xml'),
+        ('Tech & Médias', 'https://services.lesechos.fr/rss/les-echos-tech-medias.xml'),
+    ]

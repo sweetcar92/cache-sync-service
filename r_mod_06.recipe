@@ -1,0 +1,167 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+import json
+import re
+from calibre.web.feeds.news import BasicNewsRecipe
+
+
+class FeedMod06(BasicNewsRecipe):
+    title = 'Courrier International'
+    timefmt = ' - %d/%m %Hh%M'
+    __author__ = 'Mathieu Godlewski, Kabonix, Custom Local'
+    description = 'Courrier International - Edition intégrale Premium'
+    publisher = 'Courrier International'
+    publication_type = 'newspaper'
+    language = 'fr'
+    encoding = 'utf-8'
+
+    oldest_article = 7
+    max_articles_per_feed = 50
+    no_stylesheets = True
+    remove_attributes = ['style', 'height', 'width']
+    ignore_duplicate_articles = {'title'}
+
+    compress_news_images = False
+    scale_news_images_to_device = False
+    scale_news_images = None
+
+    # --- CONFIGURATION DU BYPASS PREMIUM MOBILE ---
+    browser_user_agent = 'CourrierInternational/3.5.4 (Android; 14)'
+
+    def get_browser(self, *args, **kwargs):
+        br = BasicNewsRecipe.get_browser(self, *args, **kwargs)
+        br.addheaders = [
+            ('User-Agent', self.browser_user_agent),
+            ('X-Lmd-Token', 'TWPLMOLMO'),
+            ('Accept', 'application/json')
+        ]
+        return br
+
+    def get_cover_url(self):
+        cover_url = None
+        try:
+            self.log('🔍 Recherche de la couverture du dernier numéro...')
+            soup = self.index_to_soup('https://www.courrierinternational.com/magazine')
+            first_mag = soup.find('div', class_='magazines-list').find('article', class_='item')
+            if first_mag:
+                img = first_mag.find('img')
+                if img and img.has_attr('src'):
+                    url = img['src']
+                    cover_url = url.replace('/320x0/', '/1280x0/')
+                    self.log(f'✅ Couverture HD trouvée : {cover_url}')
+        except Exception as e:
+            self.log(f'⚠️ Erreur lors de la récupération de la couverture : {e}')
+        return cover_url
+
+    def get_article_url(self, article):
+        url = BasicNewsRecipe.get_article_url(self, article)
+        match = re.search(r'_(\d+)$', url)
+        if match:
+            article_id = match.group(1)
+            return f'https://apps.courrierinternational.com/cri/v1/premium-android-phone/article?id={article_id}'
+        return url
+
+    def preprocess_raw_html(self, raw_html, url):
+        if '/cri/v1/' in url:
+            try:
+                data = json.loads(raw_html)
+                content = data['templates']['raw_content']['content']
+                content = content.replace('{{width}}', '1200').replace('{{height}}', '800')
+                content = content.replace('%7B%7Bwidth%7D%7D', '1200')
+                return f'<html><body>{content}</body></html>'
+            except Exception as e:
+                self.log(f'Erreur de décodage JSON pour {url}: {e}')
+                return raw_html
+        return raw_html
+
+    extra_css = '''
+        body { font-size: 1em; line-height: 1.4; margin: 0; padding: 0; }
+        h1, h1.calibre_title, .article-title, .title { font-size: 1.2em !important; font-weight: bold; line-height: 1.2; margin-top: 0.2em; margin-bottom: 0.6em; text-align: left; }
+        h2 { font-size: 1.1em; font-weight: bold; margin-top: 0.9em; margin-bottom: 0.4em; }
+        h3 { font-size: 1.05em; font-weight: bold; margin-top: 0.8em; margin-bottom: 0.4em; }
+        .strapline { color: #cc0000; font-weight: bold; text-transform: uppercase; display: block; margin-bottom: 0.4em; }
+        .article-lede, .chapeau, .lead { font-size: 0.95em; font-weight: bold; margin-bottom: 1em; color: #333; font-style: italic; }
+        p { font-size: 0.95em; line-height: 1.4; text-align: justify; margin-top: 0; margin-bottom: 0.8em; }
+        figure, div.figure { margin: 0.6em 0; padding: 0; text-align: center; }
+        figure div, figure p { margin: 0; padding: 0; }
+        img { display: block; margin: 0.4em auto; width: 80%; max-width: 100%; height: auto; }
+        figcaption, .caption, .credit { display: block; margin-top: 0.2em; font-size: 0.8em; line-height: 1.25; color: #555; font-style: italic; text-align: center; }
+    '''
+
+    keep_only_tags = [
+        dict(name='article'),
+        dict(name='span', attrs={'class': 'strapline'}),
+        dict(name='h1', attrs={'class': 'article-title'}),
+        dict(name='p', attrs={'class': 'article-lede'}),
+        dict(name='div', attrs={'class': 'article-text'}),
+    ]
+
+    remove_tags = [
+        dict(
+            attrs={
+                'class': [
+                    'asset-read-more',
+                    'article-secondary',
+                    'article-aside',
+                    'item',
+                    'source-logo',
+                    'source-lang',
+                    'info-time',
+                    'article-paywall',
+                    'article-readmore',
+                    'article-outbrain',
+                    'ci-services',
+                    'article-tools',
+                ]
+            }
+        )
+    ]
+
+    def parse_index(self):
+        feeds = BasicNewsRecipe.parse_index(self)
+        filtered_feeds = []
+        for feed_title, articles in feeds:
+            valid_articles = []
+            for a in articles:
+                title = a.get('title', '').strip()
+                t_upper = title.upper()
+                if t_upper.startswith(('EN DIRECT', 'DIRECT', '[EN DIRECT]', 'LIVE')) or 'EN DIRECT' in t_upper or 'DIRECT :' in t_upper:
+                    self.report_progress(0, f"Ignoré (EN DIRECT): {title}")
+                    continue
+                valid_articles.append(a)
+            if valid_articles:
+                filtered_feeds.append((feed_title, valid_articles))
+        return filtered_feeds
+
+    def preprocess_html(self, soup):
+        for tag in soup.find_all(['img', 'figure', 'picture', 'div', 'p', 'span']):
+            for attr in ['width', 'height', 'style', 'aspect-ratio']:
+                if tag.has_attr(attr):
+                    del tag[attr]
+
+        for img in soup.find_all('img'):
+            if img.has_attr('srcset'):
+                try:
+                    best_link = img['srcset'].split(',')[-1].strip().split(' ')[0]
+                    img['src'] = best_link
+                except Exception:
+                    pass
+            if img.has_attr('src') and img['src'].startswith('/'):
+                img['src'] = 'https://www.courrierinternational.com' + img['src']
+
+        for link in soup.find_all('a', href=re.compile(r'^/')):
+            link['href'] = 'https://www.courrierinternational.com' + link['href']
+
+        return soup
+
+    feeds = [
+        ('France', 'https://www.courrierinternational.com/feed/rubrique/france/rss.xml'),
+        ('Géopolitique', 'https://www.courrierinternational.com/feed/rubrique/geopolitique/rss.xml'),
+        ('Économie', 'https://www.courrierinternational.com/feed/rubrique/economie/rss.xml'),
+        ('Société', 'https://www.courrierinternational.com/feed/rubrique/societe/rss.xml'),
+        ('Politique', 'https://www.courrierinternational.com/feed/rubrique/politique/rss.xml'),
+        ('Sciences & Environnement', 'https://www.courrierinternational.com/feed/rubrique/science-environnement/rss.xml'),
+        ('Culture', 'https://www.courrierinternational.com/feed/rubrique/culture/rss.xml'),
+        ('Expat', 'https://www.courrierinternational.com/feed/rubrique/expat/rss.xml'),
+        ('À la une & International', 'https://www.courrierinternational.com/feed/all/rss.xml'),
+    ]
