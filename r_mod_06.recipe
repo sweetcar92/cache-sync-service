@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # vim:fileencoding=utf-8
+import os
 import json
 import re
 import urllib.request
@@ -79,24 +80,30 @@ class FeedMod06(BasicNewsRecipe):
         return cover_url
 
     def download_cover(self):
-        cover_url = self.get_cover_url()
-        if not cover_url:
-            return
         try:
+            url = self.get_cover_url()
+            if not url:
+                return False
+            self.log(f'🔍 Téléchargement de la couverture depuis {url}')
             headers = {'User-Agent': self.browser_user_agent}
-            req = urllib.request.Request(cover_url, headers=headers)
+            req = urllib.request.Request(url, headers=headers)
             data = urllib.request.urlopen(req).read()
             from io import BytesIO
             from PIL import Image
             im = Image.open(BytesIO(data))
             if im.mode != 'RGB':
                 im = im.convert('RGB')
-            with open(self.cover_path, 'wb') as f:
+
+            cover_file = os.path.join(self.output_dir, 'cover.jpg')
+            with open(cover_file, 'wb') as f:
                 im.save(f, format='JPEG', quality=95)
-            self.log(f'✅ Couverture HD téléchargée et convertie avec succès ({len(data)} octets)')
+
+            self.cover_path = cover_file
+            self.log(f'✅ Couverture HD enregistrée dans {cover_file} ({len(data)} octets)')
+            return True
         except Exception as e:
-            self.log(f'⚠️ Fallback download_cover : {e}')
-            BasicNewsRecipe.download_cover(self)
+            self.log(f'⚠️ Erreur lors du téléchargement de la couverture : {e}')
+            return False
 
     def get_article_url(self, article):
         url = BasicNewsRecipe.get_article_url(self, article)

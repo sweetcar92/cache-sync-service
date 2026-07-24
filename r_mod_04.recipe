@@ -75,36 +75,42 @@ class FeedMod04(BasicNewsRecipe):
         return cover_url
 
     def download_cover(self):
-        cover_url = self.get_cover_url()
-        if not cover_url:
-            return
         try:
+            url = self.get_cover_url()
+            if not url:
+                return False
+            self.log(f'🔍 Téléchargement de la Une depuis {url}')
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Referer': 'https://www.frontpages.com/'
             }
-            req = urllib.request.Request(cover_url, headers=headers)
+            req = urllib.request.Request(url, headers=headers)
             try:
                 data = urllib.request.urlopen(req).read()
-            except Exception:
-                if '@2x.webp' in cover_url:
-                    cover_url_1x = cover_url.replace('@2x.webp', '.webp')
-                    req = urllib.request.Request(cover_url_1x, headers=headers)
+            except Exception as e:
+                if '@2x.webp' in url:
+                    url_1x = url.replace('@2x.webp', '.webp')
+                    req = urllib.request.Request(url_1x, headers=headers)
                     data = urllib.request.urlopen(req).read()
                 else:
-                    raise
+                    raise e
 
             from io import BytesIO
             from PIL import Image
             im = Image.open(BytesIO(data))
             if im.mode != 'RGB':
                 im = im.convert('RGB')
-            with open(self.cover_path, 'wb') as f:
+
+            cover_file = os.path.join(self.output_dir, 'cover.jpg')
+            with open(cover_file, 'wb') as f:
                 im.save(f, format='JPEG', quality=95)
-            self.log(f'✅ Couverture de Une téléchargée et convertie en JPEG avec succès ({len(data)} octets)')
+
+            self.cover_path = cover_file
+            self.log(f'✅ Couverture de Une enregistrée dans {cover_file} ({len(data)} octets)')
+            return True
         except Exception as e:
-            self.log(f'⚠️ Fallback download_cover : {e}')
-            BasicNewsRecipe.download_cover(self)
+            self.log(f'⚠️ Erreur lors du téléchargement de la couverture : {e}')
+            return False
 
     def create_opf(self, *args, **kwargs):
         opf_path = BasicNewsRecipe.create_opf(self, *args, **kwargs)
