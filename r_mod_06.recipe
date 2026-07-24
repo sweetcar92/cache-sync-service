@@ -2,6 +2,7 @@
 # vim:fileencoding=utf-8
 import json
 import re
+import urllib.request
 from datetime import date, datetime
 from calibre.web.feeds.news import BasicNewsRecipe
 
@@ -76,6 +77,26 @@ class FeedMod06(BasicNewsRecipe):
         except Exception as e:
             self.log(f'⚠️ Erreur lors de la récupération de la couverture : {e}')
         return cover_url
+
+    def download_cover(self):
+        cover_url = self.get_cover_url()
+        if not cover_url:
+            return
+        try:
+            headers = {'User-Agent': self.browser_user_agent}
+            req = urllib.request.Request(cover_url, headers=headers)
+            data = urllib.request.urlopen(req).read()
+            from io import BytesIO
+            from PIL import Image
+            im = Image.open(BytesIO(data))
+            if im.mode != 'RGB':
+                im = im.convert('RGB')
+            with open(self.cover_path, 'wb') as f:
+                im.save(f, format='JPEG', quality=95)
+            self.log(f'✅ Couverture HD téléchargée et convertie avec succès ({len(data)} octets)')
+        except Exception as e:
+            self.log(f'⚠️ Fallback download_cover : {e}')
+            BasicNewsRecipe.download_cover(self)
 
     def get_article_url(self, article):
         url = BasicNewsRecipe.get_article_url(self, article)

@@ -4,6 +4,7 @@ import os
 import sys
 import glob
 import re
+import urllib.request
 import json
 import io
 from urllib.parse import quote, urljoin
@@ -52,15 +53,58 @@ class FeedMod04(BasicNewsRecipe):
     def get_cover_url(self):
         cover_url = None
         try:
-            self.log('🔍 Recherche de la Une du jour sur frontpages.com (Le Figaro)...')
-            soup = self.index_to_soup('https://www.frontpages.com/le-figaro/')
-            tag = soup.find('meta', property='og:image') or soup.find('meta', attrs={'name': 'og:image'})
-            if tag and tag.get('content'):
-                cover_url = tag['content']
+            self.log('🔍 Recherche de la Une du jour sur frontpages.com (le-figaro)...')
+            page_url = 'https://www.frontpages.com/le-figaro/'
+            soup = self.index_to_soup(page_url)
+            html = str(soup)
+            matches = re.findall(r'/[a-z0-9]+/20\d{2}/\d{2}/\d{2}/[^\'"\s>]+\.(?:webp|jpg)', html)
+            paper_matches = [m for m in matches if 'le-figaro' in m and not any(x in m for x in ['sport', 'sports'])]
+            if not paper_matches:
+                paper_matches = [m for m in matches if 'le-figaro' in m]
+            if paper_matches:
+                raw_path = paper_matches[0]
+                clean_path = re.sub(r'^/(?:share|g|t)/', '/t/', raw_path)
+                clean_path = clean_path.replace('.webp.jpg', '@2x.webp')
+                if not clean_path.endswith('@2x.webp') and clean_path.endswith('.webp'):
+                    clean_path = clean_path.replace('.webp', '@2x.webp')
+                cover_url = 'https://www.frontpages.com' + clean_path
                 self.log(f'✅ Une frontpages.com trouvée : {cover_url}')
         except Exception as e:
             self.log(f'⚠️ Erreur couverture frontpages.com : {e}')
+
         return cover_url
+
+    def download_cover(self):
+        cover_url = self.get_cover_url()
+        if not cover_url:
+            return
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Referer': 'https://www.frontpages.com/'
+            }
+            req = urllib.request.Request(cover_url, headers=headers)
+            try:
+                data = urllib.request.urlopen(req).read()
+            except Exception:
+                if '@2x.webp' in cover_url:
+                    cover_url_1x = cover_url.replace('@2x.webp', '.webp')
+                    req = urllib.request.Request(cover_url_1x, headers=headers)
+                    data = urllib.request.urlopen(req).read()
+                else:
+                    raise
+
+            from io import BytesIO
+            from PIL import Image
+            im = Image.open(BytesIO(data))
+            if im.mode != 'RGB':
+                im = im.convert('RGB')
+            with open(self.cover_path, 'wb') as f:
+                im.save(f, format='JPEG', quality=95)
+            self.log(f'✅ Couverture de Une téléchargée et convertie en JPEG avec succès ({len(data)} octets)')
+        except Exception as e:
+            self.log(f'⚠️ Fallback download_cover : {e}')
+            BasicNewsRecipe.download_cover(self)
 
     def create_opf(self, *args, **kwargs):
         opf_path = BasicNewsRecipe.create_opf(self, *args, **kwargs)
