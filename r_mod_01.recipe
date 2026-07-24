@@ -29,9 +29,11 @@ class FeedMod01(BasicNewsRecipe):
     auto_cleanup = False
     delay = 1
 
-    compress_news_images = False
-    scale_news_images_to_device = False
-    scale_news_images = None
+    compress_news_images = True
+    compress_news_images_auto_size = 10
+    compress_news_images_max_size = 40
+    scale_news_images_to_device = True
+    scale_news_images = (800, 600)
 
     browser_user_agent = 'LeMonde/9.20.1 (Android; 14)'
 
