@@ -45,8 +45,8 @@ class FeedMod04(BasicNewsRecipe):
     delay = 1.0
 
     compress_news_images = True
-    compress_news_images_auto_size = 10
-    compress_news_images_max_size = 40
+    compress_news_images_auto_size = 2
+    compress_news_images_max_size = 20
     scale_news_images_to_device = True
     scale_news_images = (800, 600)
 
