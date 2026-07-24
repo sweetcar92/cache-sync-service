@@ -2,6 +2,7 @@
 # vim:fileencoding=utf-8
 import json
 import re
+from datetime import date, datetime
 from calibre.web.feeds.news import BasicNewsRecipe
 
 
@@ -36,6 +37,27 @@ class FeedMod06(BasicNewsRecipe):
             ('Accept', 'application/json')
         ]
         return br
+
+    def create_opf(self, feeds, dir_):
+        opf_path = BasicNewsRecipe.create_opf(self, feeds, dir_)
+        try:
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            days_fr = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche']
+            day_name = days_fr[datetime.now().weekday()]
+            series_idx = datetime.now().strftime('%Y%m%d%H%M')
+
+            content = re.sub(r'<dc:creator[^>]*>.*?</dc:creator>', f'<dc:creator opf:role="aut">{day_name}</dc:creator>', content, flags=re.DOTALL)
+            series_meta = f'<meta name="calibre:series" content="{self.title}"/>\n<meta name="calibre:series_index" content="{series_idx}"/>'
+            if '</metadata>' in content:
+                content = content.replace('</metadata>', f'{series_meta}\n</metadata>')
+
+            with open(opf_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            self.log(f'⚠️ OPF metadata update error: {e}')
+        return opf_path
 
     def get_cover_url(self):
         cover_url = None

@@ -4,7 +4,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 
 from calibre.web.feeds.news import BasicNewsRecipe
 
@@ -66,8 +66,43 @@ class FeedMod01(BasicNewsRecipe):
         return raw_html
 
     def get_cover_url(self):
-        cover_id = date.today().strftime('%Y%m%d')
-        return 'https://www.lemonde.fr/thumbnail/journal/' + cover_id + '/1000/1490'
+        cover_url = None
+        try:
+            self.log('🔍 Recherche de la Une du jour sur frontpages.com (Le Monde)...')
+            soup = self.index_to_soup('https://www.frontpages.com/le-monde/')
+            tag = soup.find('meta', property='og:image') or soup.find('meta', attrs={'name': 'og:image'})
+            if tag and tag.get('content'):
+                cover_url = tag['content']
+                self.log(f'✅ Une frontpages.com trouvée : {cover_url}')
+        except Exception as e:
+            self.log(f'⚠️ Erreur couverture frontpages.com : {e}')
+
+        if not cover_url:
+            cover_id = date.today().strftime('%Y%m%d')
+            cover_url = 'https://www.lemonde.fr/thumbnail/journal/' + cover_id + '/1000/1490'
+
+        return cover_url
+
+    def create_opf(self, feeds, dir_):
+        opf_path = BasicNewsRecipe.create_opf(self, feeds, dir_)
+        try:
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            days_fr = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche']
+            day_name = days_fr[datetime.now().weekday()]
+            series_idx = datetime.now().strftime('%Y%m%d%H%M')
+
+            content = re.sub(r'<dc:creator[^>]*>.*?</dc:creator>', f'<dc:creator opf:role="aut">{day_name}</dc:creator>', content, flags=re.DOTALL)
+            series_meta = f'<meta name="calibre:series" content="{self.title}"/>\n<meta name="calibre:series_index" content="{series_idx}"/>'
+            if '</metadata>' in content:
+                content = content.replace('</metadata>', f'{series_meta}\n</metadata>')
+
+            with open(opf_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            self.log(f'⚠️ OPF metadata update error: {e}')
+        return opf_path
 
     keep_only_tags = [
         dict(name='h1', attrs={'class': ['heading', 'article__title']}),

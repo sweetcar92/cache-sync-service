@@ -4,6 +4,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 import json
 import re
+from datetime import date, datetime
 
 from calibre.web.feeds.news import BasicNewsRecipe
 
@@ -41,22 +42,49 @@ class FeedMod02(BasicNewsRecipe):
     def get_cover_url(self):
         cover_url = None
         try:
-            self.log('🔍 Recherche de la Une du jour sur le kiosque...')
-            soup = self.index_to_soup('https://www.kiosque.leparisien.fr/')
-            img = soup.find('img', class_=re.compile(r'main-image', re.I))
-
-            if img and img.has_attr('src'):
-                url = img['src']
-                if url.startswith('//'):
-                    url = 'https:' + url
-                cover_url = url.replace('-MEDIUM-', '-LARGE-')
-                self.log(f'✅ Une trouvée : {cover_url}')
-            else:
-                self.log('⚠️ Image de Une non trouvée sur la page.')
+            self.log('🔍 Recherche de la Une du jour sur frontpages.com (Le Parisien)...')
+            soup = self.index_to_soup('https://www.frontpages.com/le-parisien/')
+            tag = soup.find('meta', property='og:image') or soup.find('meta', attrs={'name': 'og:image'})
+            if tag and tag.get('content'):
+                cover_url = tag['content']
+                self.log(f'✅ Une frontpages.com trouvée : {cover_url}')
         except Exception as e:
-            self.log(f'❌ Erreur cover : {e}')
+            self.log(f'⚠️ Erreur couverture frontpages.com : {e}')
+
+        if not cover_url:
+            try:
+                soup = self.index_to_soup('https://www.kiosque.leparisien.fr/')
+                img = soup.find('img', class_=re.compile(r'main-image', re.I))
+                if img and img.has_attr('src'):
+                    url = img['src']
+                    if url.startswith('//'):
+                        url = 'https:' + url
+                    cover_url = url.replace('-MEDIUM-', '-LARGE-')
+            except Exception:
+                pass
 
         return cover_url
+
+    def create_opf(self, feeds, dir_):
+        opf_path = BasicNewsRecipe.create_opf(self, feeds, dir_)
+        try:
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            days_fr = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche']
+            day_name = days_fr[datetime.now().weekday()]
+            series_idx = datetime.now().strftime('%Y%m%d%H%M')
+
+            content = re.sub(r'<dc:creator[^>]*>.*?</dc:creator>', f'<dc:creator opf:role="aut">{day_name}</dc:creator>', content, flags=re.DOTALL)
+            series_meta = f'<meta name="calibre:series" content="{self.title}"/>\n<meta name="calibre:series_index" content="{series_idx}"/>'
+            if '</metadata>' in content:
+                content = content.replace('</metadata>', f'{series_meta}\n</metadata>')
+
+            with open(opf_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            self.log(f'⚠️ OPF metadata update error: {e}')
+        return opf_path
 
     def get_article_url(self, article):
         url = article.get('link', article.get('url', ''))
