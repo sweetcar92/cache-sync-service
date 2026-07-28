@@ -1,0 +1,126 @@
+name: Data Sync Pipeline
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [trigger-build]
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install System Dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends calibre
+          sudo wget -q https://github.com/pgaskin/kepubify/releases/latest/download/kepubify-linux-64bit -O /usr/local/bin/kepubify
+          sudo chmod +x /usr/local/bin/kepubify
+
+      - name: Install Python Dependencies
+        run: |
+          sudo apt-get install -y python3-pip
+          sudo python3 -m pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib requests curl_cffi Pillow html5_parser
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib requests curl_cffi Pillow html5_parser
+
+      - name: Generate Datasets
+        env:
+          TZ: "Europe/Paris"
+        run: |
+          DATE_FILE=$(date +'%Y-%m-%d_%Hh%M')
+
+          MONDE_FILE="Le_Monde_${DATE_FILE}.kepub.epub"
+          PARISIEN_FILE="Le_Parisien_${DATE_FILE}.kepub.epub"
+          ECHOS_FILE="Les_Echos_${DATE_FILE}.kepub.epub"
+          FIGARO_FILE="Le_Figaro_${DATE_FILE}.kepub.epub"
+          WAPO_FILE="Washington_Post_${DATE_FILE}.kepub.epub"
+          COURRIER_FILE="Courrier_International_${DATE_FILE}.kepub.epub"
+          GUARDIAN_FILE="The_Guardian_${DATE_FILE}.kepub.epub"
+          BBC_FILE="BBC_News_${DATE_FILE}.kepub.epub"
+          NYT_FILE="The_New_York_Times_${DATE_FILE}.kepub.epub"
+
+          echo "DATE_FILE=$DATE_FILE" >> $GITHUB_ENV
+          echo "MONDE_FILE=$MONDE_FILE" >> $GITHUB_ENV
+          echo "PARISIEN_FILE=$PARISIEN_FILE" >> $GITHUB_ENV
+          echo "ECHOS_FILE=$ECHOS_FILE" >> $GITHUB_ENV
+          echo "FIGARO_FILE=$FIGARO_FILE" >> $GITHUB_ENV
+          echo "WAPO_FILE=$WAPO_FILE" >> $GITHUB_ENV
+          echo "COURRIER_FILE=$COURRIER_FILE" >> $GITHUB_ENV
+          echo "GUARDIAN_FILE=$GUARDIAN_FILE" >> $GITHUB_ENV
+          echo "BBC_FILE=$BBC_FILE" >> $GITHUB_ENV
+          echo "NYT_FILE=$NYT_FILE" >> $GITHUB_ENV
+
+          echo "=== Génération Le Monde ==="
+          ebook-convert r_mod_01.recipe "Le_Monde_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ Le Monde failed"
+
+          echo "=== Génération Le Parisien ==="
+          ebook-convert r_mod_02.recipe "Le_Parisien_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ Le Parisien failed"
+
+          echo "=== Génération Les Echos ==="
+          ebook-convert r_mod_03.recipe "Les_Echos_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ Les Echos failed"
+
+          echo "=== Génération Le Figaro ==="
+          ebook-convert r_mod_04.recipe "Le_Figaro_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ Le Figaro failed"
+
+          echo "=== Génération Washington Post ==="
+          ebook-convert r_mod_05.recipe "Washington_Post_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ Washington Post failed"
+
+          echo "=== Génération Courrier International ==="
+          ebook-convert r_mod_06.recipe "Courrier_International_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ Courrier International failed"
+
+          echo "=== Génération The Guardian ==="
+          ebook-convert r_mod_07.recipe "The_Guardian_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ The Guardian failed"
+
+          echo "=== Génération BBC News ==="
+          ebook-convert r_mod_08.recipe "BBC_News_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ BBC News failed"
+
+          # Only generate NYTimes for afternoon run (between 14h and 23h Paris time)
+          IS_AFTERNOON=$(python -c "import datetime; from zoneinfo import ZoneInfo; h = datetime.datetime.now(ZoneInfo('Europe/Paris')).hour; print('true' if 14 <= h <= 23 else 'false')")
+          if [ "$IS_AFTERNOON" = "true" ]; then
+            echo "=== Génération The New York Times (Édition de l'après-midi) ==="
+            SCRAPEOPS_KEY="${{ secrets.SCRAPEOPS_KEY }}" \
+            SCRAPEOPS_KEY_BACKUP="${{ secrets.SCRAPEOPS_KEY_BACKUP }}" \
+            ebook-convert r_mod_09.recipe "The_New_York_Times_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ The New York Times failed"
+          else
+            echo "⏩ NYT ignoré pour le passage du matin (réservé à l'édition de 17h pour économiser les crédits)"
+          fi
+
+      - name: Convert Outputs
+        run: |
+          kepubify *.epub
+          for f in *_converted.kepub.epub; do
+            [ -f "$f" ] && mv "$f" "${f/_converted.kepub.epub/.kepub.epub}"
+          done
+          python set_epub_metadata.py "$MONDE_FILE" "Le Monde" || true
+          python set_epub_metadata.py "$PARISIEN_FILE" "Le Parisien" || true
+          python set_epub_metadata.py "$ECHOS_FILE" "Les Echos" || true
+          python set_epub_metadata.py "$FIGARO_FILE" "Le Figaro" || true
+          python set_epub_metadata.py "$WAPO_FILE" "The Washington Post" || true
+          python set_epub_metadata.py "$COURRIER_FILE" "Courrier International" || true
+          python set_epub_metadata.py "$GUARDIAN_FILE" "The Guardian" || true
+          python set_epub_metadata.py "$BBC_FILE" "BBC News" || true
+          [ -f "$NYT_FILE" ] && python set_epub_metadata.py "$NYT_FILE" "The New York Times" || true
+          echo "=== Datasets Ready ==="
+          ls -lh *.kepub.epub
+
+      - name: Sync Outputs to External Storage
+        run: |
+          FILES_TO_SYNC="$MONDE_FILE,$PARISIEN_FILE,$ECHOS_FILE,$FIGARO_FILE,$WAPO_FILE,$COURRIER_FILE,$GUARDIAN_FILE,$BBC_FILE"
+          [ -f "$NYT_FILE" ] && FILES_TO_SYNC="$FILES_TO_SYNC,$NYT_FILE"
+
+          GDRIVE_FOLDER_ID="1fonLAb_c2_2ax6EAIpvZnNlrHGK_cqsY" \
+          GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
+          GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
+          GOOGLE_REFRESH_TOKEN="${{ secrets.GOOGLE_REFRESH_TOKEN }}" \
+          TARGET_FILES="$FILES_TO_SYNC" \
+          python drive_sync.py

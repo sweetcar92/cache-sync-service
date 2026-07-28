@@ -1,0 +1,233 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+import os
+import json
+import re
+import urllib.request
+from datetime import date, datetime
+
+from calibre.web.feeds.news import BasicNewsRecipe
+
+
+class FeedMod08(BasicNewsRecipe):
+    title = 'BBC News'
+    __author__ = 'BBC News'
+    description = 'BBC News World Edition'
+    publisher = 'BBC News'
+    publication_type = 'newspaper'
+    language = 'en_GB'
+    encoding = 'utf-8'
+
+    timefmt = ' - %d/%m %Hh%M'
+    oldest_article = 1
+    max_articles_per_feed = 50
+    reverse_article_order = True
+    remove_javascript = True
+    remove_empty_feeds = True
+    no_stylesheets = True
+    remove_attributes = ['style', 'height', 'width']
+    ignore_duplicate_articles = {'title', 'url'}
+
+    max_articles_per_feed = 20
+
+    compress_news_images = True
+    compress_news_images_auto_size = 5
+    compress_news_images_max_size = 25
+    scale_news_images_to_device = True
+    scale_news_images = (600, 600)
+
+    browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+    def get_browser(self, *args, **kwargs):
+        kwargs['user_agent'] = self.browser_user_agent
+        br = BasicNewsRecipe.get_browser(self, *args, **kwargs)
+        return br
+
+    keep_only_tags = [
+        dict(name='main'),
+        dict(name='article'),
+    ]
+
+    remove_tags = [
+        dict(attrs={'class': lambda x: x and any(c in str(x) for c in ['ssrcss-11yd349-Stack', 'ssrcss-1b32pbc-ComponentWrapper', 'ssrcss-e7j6a-SocialShare', 'ssrcss-1v77c1b-Navigation', 'ssrcss-118t02q-TopicList', 'ssrcss-180g7w-Masthead'])}),
+        dict(attrs={'data-component': ['share-button', 'navigation', 'footer', 'header', 'topStories', 'elsewhere', 'mostRead', 'features', 'topic-list', 'related-content', 'see-also', 'byline-block', 'sub-nav', 'tag-list']}),
+        dict(name=['script', 'style', 'noscript', 'button', 'input', 'svg', 'nav', 'header', 'footer']),
+    ]
+
+    extra_css = '''
+        body { font-size: 1em; line-height: 1.4; margin: 0; padding: 0; }
+        h1, h1.calibre_title, .article-title, .title, header h1 { font-size: 1.3em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.2em !important; margin-bottom: 0.5em !important; text-align: left !important; }
+        h2, header h2 { font-size: 1.1em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.8em !important; margin-bottom: 0.3em !important; text-align: left !important; }
+        h3, h4 { font-size: 1.02em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.6em !important; margin-bottom: 0.2em !important; text-align: left !important; }
+        p { font-size: 0.95em; line-height: 1.4; text-align: justify; margin-top: 0; margin-bottom: 0.8em; }
+        figure, div.figure { display: block !important; margin: 1.2em auto 2.2em auto !important; padding: 0 !important; text-align: center !important; clear: both !important; }
+        figure div { margin: 0; padding: 0; }
+        img { display: block; margin: 0.4em auto; width: 85%; max-width: 100%; height: auto; }
+        figcaption, figcaption *, figure figcaption, figure figcaption *, .caption, .caption *, span.caption-text, div.element-image__caption, [data-component="caption"], [data-component="caption"] p, [data-component="caption"] span { display: block !important; margin-top: 0.5em !important; margin-bottom: 1.8em !important; font-size: 0.78em !important; line-height: 1.3 !important; color: #555555 !important; font-style: italic !important; text-align: center !important; font-weight: normal !important; }
+    '''
+
+    def download_cover(self):
+        try:
+            self.log('🔍 Extraction de la photo principale de Une depuis le flux RSS BBC News...')
+            url_rss = 'https://feeds.bbci.co.uk/news/world/rss.xml'
+            headers = {'User-Agent': self.browser_user_agent}
+            req = urllib.request.Request(url_rss, headers=headers)
+            xml = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
+
+            media_imgs = re.findall(r'<media:thumbnail[^>]+url=["\']([^"\']+)["\']', xml)
+            clean_img_url = None
+            if media_imgs:
+                clean_img_url = re.sub(r'/[0-9]+/', '/1024/', media_imgs[0])
+
+            if clean_img_url:
+                self.log(f'🔍 Photo de Une trouvée : {clean_img_url}')
+                req_img = urllib.request.Request(clean_img_url, headers=headers)
+                img_data = urllib.request.urlopen(req_img).read()
+
+                from io import BytesIO
+                from PIL import Image, ImageDraw
+                lead_im = Image.open(BytesIO(img_data)).convert('RGB')
+
+                canvas_w, canvas_h = 1200, 1600
+                canvas = Image.new('RGB', (canvas_w, canvas_h), color=(255, 255, 255))
+                draw = ImageDraw.Draw(canvas)
+
+                header_h = 220
+                draw.rectangle([0, 0, canvas_w, header_h], fill=(187, 25, 25))
+
+                img_w, img_h = lead_im.size
+                target_w = 1120
+                target_h = int(img_h * (target_w / img_w))
+                if target_h > 1300:
+                    target_h = 1300
+                    target_w = int(img_w * (target_h / img_h))
+
+                lead_im_resized = lead_im.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                offset_x = (canvas_w - target_w) // 2
+                offset_y = header_h + 30 + (1320 - target_h) // 2
+
+                canvas.paste(lead_im_resized, (offset_x, offset_y))
+                draw.rectangle([0, 0, canvas_w - 1, canvas_h - 1], outline=(187, 25, 25), width=8)
+
+                cover_file = os.path.join(self.output_dir, 'cover.jpg')
+                canvas.save(cover_file, 'JPEG', quality=95)
+
+                self.cover_path = cover_file
+                self.log(f'✅ Couverture personnalisée BBC News enregistrée dans {cover_file}')
+                return True
+        except Exception as e:
+            self.log(f'⚠️ Erreur lors de la création de la couverture BBC News: {e}')
+
+        return False
+
+    def create_opf(self, *args, **kwargs):
+        opf_path = BasicNewsRecipe.create_opf(self, *args, **kwargs)
+        try:
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            series_idx = datetime.now().strftime('%Y%m%d%H%M')
+            content = re.sub(r'<dc:creator[^>]*>.*?</dc:creator>', f'<dc:creator opf:role="aut">{self.title}</dc:creator>', content, flags=re.DOTALL)
+            series_meta = f'<meta name="calibre:series" content="{self.title}"/>\n<meta name="calibre:series_index" content="{series_idx}"/>'
+            if '</metadata>' in content:
+                content = content.replace('</metadata>', f'{series_meta}\n</metadata>')
+
+            with open(opf_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            self.log(f'⚠️ OPF metadata update error: {e}')
+        return opf_path
+
+    feeds = [
+        ('World News', 'https://feeds.bbci.co.uk/news/world/rss.xml'),
+        ('Business', 'https://feeds.bbci.co.uk/news/business/rss.xml'),
+        ('Technology', 'https://feeds.bbci.co.uk/news/technology/rss.xml'),
+        ('Science & Environment', 'https://feeds.bbci.co.uk/news/science_and_environment/rss.xml'),
+        ('UK News', 'https://feeds.bbci.co.uk/news/uk/rss.xml'),
+        ('Entertainment & Arts', 'https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml'),
+    ]
+
+    def parse_index(self):
+        raw_feeds = BasicNewsRecipe.parse_index(self)
+        filtered_feeds = []
+
+        for feed_title, articles in raw_feeds:
+            valid_articles = []
+            for a in articles:
+                title = a.get('title', '').strip()
+                url = a.get('url', '').strip().lower()
+                t_upper = title.upper()
+
+                if (
+                    t_upper.startswith(('EN DIRECT', 'DIRECT', '[EN DIRECT]', 'LIVE', 'LIVE UPDATES', 'LIVE BLOG')) or
+                    'EN DIRECT' in t_upper or 'LIVE UPDATES' in t_upper or 'LIVE BLOG' in t_upper or
+                    '/live/' in url or '/en-direct/' in url or 'direct-' in url or '-live-' in url
+                ):
+                    self.log(f'Ignoré (LIVE/EN DIRECT): {title}')
+                    continue
+
+                valid_articles.append(a)
+            if valid_articles:
+                filtered_feeds.append((feed_title, valid_articles))
+
+        return filtered_feeds
+
+    def preprocess_html(self, soup):
+        # 1. Cut off end-of-article noise (Get in touch, Related topics, etc.) without destroying main container
+        cutoff_keywords = ['get in touch', 'related topics', 'more on this story', 'related stories', 'topic list', 'yourvoice@bbc.co.uk', 'whatsapp:']
+        main_body = soup.find('main') or soup.find('article') or soup
+        for elem in list(main_body.findAll(['p', 'h2', 'h3', 'form'])):
+            elem_text = elem.text.strip().lower()
+            if any(kw in elem_text for kw in cutoff_keywords):
+                for sib in list(elem.find_next_siblings()):
+                    try:
+                        sib.decompose()
+                    except Exception:
+                        pass
+                try:
+                    elem.decompose()
+                except Exception:
+                    pass
+                break
+
+        # 2. Fix image attributes with compressed resolutions
+        for img in soup.findAll('img'):
+            if img.has_attr('srcset'):
+                try:
+                    candidates = [c.strip().split(' ')[0] for c in img['srcset'].split(',') if c.strip()]
+                    url = candidates[0]
+                    for c in candidates:
+                        if '640' in c or '800' in c or '480' in c:
+                            url = c
+                            break
+                    if url.startswith('http'):
+                        img['src'] = url
+                except Exception:
+                    pass
+
+            for attr in ['srcset', 'data-srcset', 'data-src', 'loading']:
+                if img.has_attr(attr):
+                    del img[attr]
+
+        # 3. Clean and format image captions & figures
+        for fig in soup.findAll(['figure', 'aside']):
+            for svg in fig.findAll('svg'):
+                svg.extract()
+            for fc in fig.findAll(['figcaption', 'div', 'span'], attrs={'data-component': lambda x: x and 'caption' in str(x).lower()}):
+                cap_text = fc.text.strip()
+                for prefix in ['Image caption,', 'Figure caption,', 'Image source,', 'Photograph:']:
+                    if cap_text.startswith(prefix):
+                        cap_text = cap_text[len(prefix):].strip()
+                fc.string = cap_text
+                fc.name = 'figcaption'
+                fc['style'] = 'display: block !important; margin-top: 0.5em !important; margin-bottom: 1.8em !important; font-size: 0.78em !important; font-style: italic !important; color: #555555 !important; text-align: center !important; font-weight: normal !important;'
+
+        for fc in soup.findAll('figcaption'):
+            cap_text = fc.text.strip()
+            for prefix in ['Image caption,', 'Figure caption,', 'Image source,', 'Photograph:']:
+                if cap_text.startswith(prefix):
+                    cap_text = cap_text[len(prefix):].strip()
+            fc.string = cap_text
+            fc['style'] = 'display: block !important; margin-top: 0.5em !important; margin-bottom: 1.8em !important; font-size: 0.78em !important; font-style: italic !important; color: #555555 !important; text-align: center !important; font-weight: normal !important;'
+
+        return soup

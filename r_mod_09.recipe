@@ -1,0 +1,424 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+import os
+import re
+import urllib.request
+import urllib.parse
+from datetime import date, datetime
+
+from calibre.web.feeds.news import BasicNewsRecipe
+from polyglot.functools import lru_cache
+
+
+@lru_cache(2)
+def parser_module():
+    from calibre.live import load_module
+    return load_module('calibre.web.site_parsers.nytimes')
+
+
+class FeedMod09(BasicNewsRecipe):
+    title            = 'The New York Times'
+    __author__       = 'The New York Times'
+    description      = 'The New York Times Web Edition'
+    publisher        = 'The New York Times'
+    publication_type = 'newspaper'
+    language         = 'en'
+    encoding         = 'utf-8'
+
+    timefmt = ' - %d/%m %Hh%M'
+    oldest_article = 1
+    max_articles_per_feed = 5
+    reverse_article_order = True
+    remove_empty_feeds = True
+    no_stylesheets = True
+    remove_attributes = ['style', 'height', 'width']
+    ignore_duplicate_articles = {'title', 'url'}
+
+    compress_news_images = True
+    compress_news_images_auto_size = 5
+    compress_news_images_max_size = 25
+    scale_news_images_to_device = True
+    scale_news_images = (800, 600)
+
+    scrapeops_key        = os.environ.get('SCRAPEOPS_KEY', '')
+    scrapeops_key_backup = os.environ.get('SCRAPEOPS_KEY_BACKUP', '')
+
+    # Nombre max d'articles par section (World = 10, autres = 5)
+    _feed_max = {
+        'World': 10,
+    }
+    _default_max = 5
+
+    # ------------------------------------------------------------------ #
+    #  Proxy routing — primary ScrapeOps key, backup sur quota depasse    #
+    # ------------------------------------------------------------------ #
+    _use_backup_key = False   # bascule si quota primaire epuise
+
+    def _scrapeops_url(self, key, encoded_url):
+        return f'https://proxy.scrapeops.io/v1/?api_key={key}&url={encoded_url}'
+
+    def get_article_url(self, article):
+        url = BasicNewsRecipe.get_article_url(self, article)
+        clean_url = url.split('?')[0]
+        encoded_url = urllib.parse.quote(clean_url, safe='')
+
+        if self._use_backup_key and self.scrapeops_key_backup:
+            return self._scrapeops_url(self.scrapeops_key_backup, encoded_url)
+        if self.scrapeops_key:
+            return self._scrapeops_url(self.scrapeops_key, encoded_url)
+        if self.scrapeops_key_backup:
+            return self._scrapeops_url(self.scrapeops_key_backup, encoded_url)
+        return clean_url
+
+    def _is_invalid_or_quota_error(self, raw_html):
+        if not raw_html or len(raw_html.strip()) < 500:
+            return True
+        html_lower = raw_html.lower()
+        error_keywords = [
+            'quota', 'exceeded', 'unauthorized', 'forbidden', 'limit reached',
+            'api_key', 'account quota', 'credit limit', '429 too many', '403 forbidden',
+            '422 unprocessable'
+        ]
+        if any(kw in html_lower for kw in error_keywords) and len(raw_html) < 4000:
+            return True
+        if 'error' in html_lower and len(raw_html) < 1500 and not ('<article' in html_lower or '<p>' in html_lower or 'nyt' in html_lower):
+            return True
+        return False
+
+    def preprocess_raw_html(self, raw_html, url):
+        clean_url = url
+        if 'url=' in url:
+            try:
+                clean_url = urllib.parse.unquote(url.split('url=')[1].split('&')[0])
+            except Exception:
+                clean_url = url
+
+        # Detection quota / reponse vide ou en erreur
+        if self._is_invalid_or_quota_error(raw_html):
+            self.log(f'⚠️ Warning: Reponse invalide/vide ou quota depasse pour {clean_url[:80]} (taille: {len(raw_html)} octets)')
+
+            if not FeedMod09._use_backup_key and self.scrapeops_key_backup:
+                self.log('🔄 Bascule automatique de la classe sur la cle ScrapeOps backup...')
+                FeedMod09._use_backup_key = True
+
+            # Tentative de re-telechargement de l'article avec la clef de backup
+            encoded_url = urllib.parse.quote(clean_url, safe='')
+            fallback_urls = []
+            if self.scrapeops_key_backup:
+                fallback_urls.append(self._scrapeops_url(self.scrapeops_key_backup, encoded_url))
+            fallback_urls.append(clean_url)
+
+            for furl in fallback_urls:
+                if furl == url:
+                    continue
+                self.log(f'🔄 Re-tentative avec URL fallback: {furl[:70]}...')
+                try:
+                    req = urllib.request.Request(furl, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    })
+                    fetched = urllib.request.urlopen(req, timeout=20).read().decode('utf-8', errors='ignore')
+                    if not self._is_invalid_or_quota_error(fetched):
+                        self.log(f'✅ Re-telechargement reussi ({len(fetched)} octets)')
+                        raw_html = fetched
+                        break
+                except Exception as e:
+                    self.log(f'⚠️ Fallback error: {e}')
+
+        return self._preprocess_raw_html_impl(raw_html, clean_url)
+
+    # ------------------------------------------------------------------ #
+    #  Official Calibre NYT parser                                         #
+    # ------------------------------------------------------------------ #
+    @property
+    def nyt_parser(self):
+        return parser_module()
+
+    def _preprocess_raw_html_impl(self, raw_html, url):
+        # 1. Extraire les figcaptions du HTML brut AVANT tout
+        try:
+            soup_raw = self.index_to_soup(raw_html)
+            saved_captions = []
+            for figcap in soup_raw.findAll('figcaption'):
+                txt = figcap.get_text(separator=' ', strip=True)
+                txt = re.sub(r'\s*Credit\.{2,3}\s*', ' | ', txt).strip(' |')
+                if txt and len(txt) > 8 and not txt.startswith('Credit'):
+                    saved_captions.append(txt)
+        except Exception:
+            soup_raw = None
+            saved_captions = []
+
+        # 2. Essayer le parser NYT officiel
+        nyt_succeeded = False
+        extracted = raw_html
+        try:
+            result = self.nyt_parser.extract_html(soup_raw or self.index_to_soup(raw_html), url)
+            if result and '<body>' in result and len(result) > 500:
+                extracted = result
+                nyt_succeeded = True
+        except Exception as e:
+            self.log(f'Warning: NYT parser error: {e}')
+
+        # 3. Si le parser a reussi : nettoyer les legendes existantes PUIS injecter les notres
+        if nyt_succeeded:
+            try:
+                soup_out = self.index_to_soup(extracted)
+
+                # Supprimer les legendes produites par le parser NYT
+                # Le parser utilise class="cap" pour la legende et class="cred" pour le credit
+                for cap in soup_out.findAll(attrs={'class': 'cap'}):
+                    cap.decompose()
+                for cap in soup_out.findAll(attrs={'class': 'cred'}):
+                    cap.decompose()
+                # Securite : supprimer aussi data-testid=*caption* et figcaption
+                for cap in soup_out.findAll(attrs={'data-testid': lambda v: v and 'caption' in v.lower()}):
+                    cap.decompose()
+                for cap in soup_out.findAll('figcaption'):
+                    cap.decompose()
+
+                # Injecter nos legendes propres apres chaque image
+                if saved_captions:
+                    imgs = soup_out.findAll('img')
+                    for i, img in enumerate(imgs):
+                        if i < len(saved_captions):
+                            new_cap = soup_out.new_tag('p')
+                            new_cap['class'] = 'nyt-caption'
+                            new_cap.string = saved_captions[i]
+                            anchor = img
+                            for _ in range(3):
+                                if anchor.parent and anchor.parent.name not in ('body', 'html', '[document]'):
+                                    anchor = anchor.parent
+                                else:
+                                    break
+                            anchor.insert_after(new_cap)
+
+                return str(soup_out)
+            except Exception as e:
+                self.log(f'Warning: caption cleanup/injection failed: {e}')
+
+        # 4. Si le parser NYT a echoue, construire le HTML depuis le brut
+        if not nyt_succeeded and soup_raw:
+            try:
+                return self._extract_from_raw(soup_raw)
+            except Exception as e:
+                self.log(f'Warning: raw extraction failed: {e}')
+
+        return extracted
+
+    def _extract_from_raw(self, soup):
+        """Extraction directe depuis le HTML brut NYT quand le parser JSON échoue."""
+        title = ''
+        t = soup.find('h1')
+        if t:
+            title = t.get_text(strip=True)
+
+        byline = ''
+        for b in soup.findAll(attrs={'class': lambda c: c and any('byline' in str(x).lower() for x in (c if isinstance(c, list) else [c]))}):
+            txt = b.get_text(strip=True)
+            if txt and len(txt) < 200:
+                byline = txt
+                break
+
+        # Corps : paragraphes de l'article
+        body_parts = []
+        article = soup.find('article') or soup.find('section', attrs={'class': lambda c: c and 'meteredContent' in str(c)})
+        if article:
+            for tag in article.findAll(['p', 'h2', 'h3', 'figure', 'figcaption']):
+                # findAll est recursif : ignorer les tags imbriques dans un <figure>
+                # (la figure les traite elle-meme, sinon la legende s'affiche en double)
+                if tag.name in ('p', 'figcaption') and tag.find_parent('figure'):
+                    continue
+                # Ignorer aussi les <p> imbriques dans un <figcaption> standalone
+                if tag.name == 'p' and tag.find_parent('figcaption'):
+                    continue
+
+                if tag.name == 'figcaption':
+                    txt = tag.get_text(separator=' ', strip=True)
+                    txt = re.sub(r'\s*Credit\.{2,3}\s*', ' | ', txt).strip(' |')
+                    # Ne pas afficher les legendes vides ou qui ne sont que du credit
+                    if txt and len(txt) > 8 and not txt.startswith('Credit'):
+                        body_parts.append(f'<p class="nyt-caption">{txt}</p>')
+                elif tag.name == 'figure':
+                    img = tag.find('img')
+                    if img and img.get('src', '').startswith('http'):
+                        body_parts.append(f'<img src="{img["src"]}" alt="{img.get("alt","")}" />')
+                    figcap = tag.find('figcaption')
+                    if figcap:
+                        txt = figcap.get_text(separator=' ', strip=True)
+                        txt = re.sub(r'\s*Credit\.{2,3}\s*', ' | ', txt).strip(' |')
+                        # Ne pas afficher les legendes vides ou qui ne sont que du credit
+                        if txt and len(txt) > 8 and not txt.startswith('Credit'):
+                            body_parts.append(f'<p class="nyt-caption">{txt}</p>')
+                elif tag.name == 'p':
+                    txt = tag.get_text(strip=True)
+                    if txt and len(txt) > 20:
+                        body_parts.append(f'<p>{txt}</p>')
+                else:
+                    txt = tag.get_text(strip=True)
+                    if txt:
+                        body_parts.append(f'<{tag.name}>{txt}</{tag.name}>')
+
+        body_html = '\n'.join(body_parts)
+        return (
+            f'<html><head><title>{title}</title></head><body>'
+            f'<h1>{title}</h1>'
+            + (f'<p class="byline">{byline}</p>' if byline else '')
+            + body_html
+            + '</body></html>'
+        )
+
+
+    # ------------------------------------------------------------------ #
+    #  Front cover — meme logique que Le Monde                            #
+    # ------------------------------------------------------------------ #
+    def get_cover_url(self):
+        try:
+            self.log('Recherche de la Une NYT sur frontpages.com...')
+            page_url = 'https://www.frontpages.com/the-new-york-times/'
+            soup = self.index_to_soup(page_url)
+            html = str(soup)
+            # og:image → /g/YYYY/MM/DD/the-new-york-times-XXXXX.webp.jpg
+            # On convertit en /t/...@2x.webp (URL telechargeable)
+            m = re.search(r'property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html)
+            if not m:
+                m = re.search(r'content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html)
+            if m:
+                og_url = m.group(1)
+                cover_url = og_url.replace('/g/', '/t/').replace('.webp.jpg', '@2x.webp')
+                self.log(f'Une NYT trouvee : {cover_url}')
+                return cover_url
+        except Exception as e:
+            self.log(f'Erreur couverture frontpages.com : {e}')
+        return None
+
+    def download_cover(self):
+        # Identique a Le Monde : PIL → cover.jpg → self.output_dir → self.cover_path
+        try:
+            url = self.get_cover_url()
+            if not url:
+                return False
+            self.log(f'Telechargement de la Une NYT depuis {url}')
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://www.frontpages.com/'
+            }
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                data = urllib.request.urlopen(req, timeout=15).read()
+            except Exception:
+                url_1x = url.replace('@2x.webp', '.webp')
+                req = urllib.request.Request(url_1x, headers=headers)
+                data = urllib.request.urlopen(req, timeout=15).read()
+
+            from io import BytesIO
+            from PIL import Image
+            im = Image.open(BytesIO(data))
+            if im.mode != 'RGB':
+                im = im.convert('RGB')
+
+            cover_file = os.path.join(self.output_dir, 'cover.jpg')
+            with open(cover_file, 'wb') as f:
+                im.save(f, format='JPEG', quality=95)
+
+            self.cover_path = cover_file
+            self.log(f'Couverture NYT enregistree dans {cover_file} ({len(data)} octets)')
+            return True
+        except Exception as e:
+            self.log(f'Erreur telechargement couverture NYT : {e}')
+            return False
+
+    # ------------------------------------------------------------------ #
+    #  KEPUB / OPF metadata — meme logique que Le Monde                   #
+    # ------------------------------------------------------------------ #
+    def create_opf(self, *args, **kwargs):
+        opf_path = BasicNewsRecipe.create_opf(self, *args, **kwargs)
+        if not opf_path:
+            return opf_path
+        try:
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            days_en = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            day_name = days_en[datetime.now().weekday()]
+            series_idx = datetime.now().strftime('%Y%m%d%H%M')
+
+            content = re.sub(
+                r'<dc:creator[^>]*>.*?</dc:creator>',
+                f'<dc:creator opf:role="aut">{day_name}</dc:creator>',
+                content, flags=re.DOTALL
+            )
+            series_meta = (
+                f'<meta name="calibre:series" content="{self.title}"/>\n'
+                f'<meta name="calibre:series_index" content="{series_idx}"/>'
+            )
+            if '</metadata>' in content:
+                content = content.replace('</metadata>', f'{series_meta}\n</metadata>')
+
+            with open(opf_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            self.log(f'OPF metadata update error: {e}')
+        return opf_path
+
+    # ------------------------------------------------------------------ #
+    #  Feeds                                                               #
+    # ------------------------------------------------------------------ #
+    feeds = [
+        ('World',                'https://rss.nytimes.com/services/xml/rss/nyt/World.xml'),
+        ('U.S.',                 'https://rss.nytimes.com/services/xml/rss/nyt/US.xml'),
+        ('Business',             'https://rss.nytimes.com/services/xml/rss/nyt/Business.xml'),
+        ('Technology & Science', 'https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml'),
+    ]
+
+    # max_articles_per_feed mis a 10 pour que le RSS parse suffisamment d'articles ;
+    # parse_index reduit ensuite chaque section au bon nombre (_feed_max / _default_max)
+    max_articles_per_feed = 10
+
+    def parse_index(self):
+        feeds = BasicNewsRecipe.parse_index(self)
+        result = []
+        for feed_title, articles in feeds:
+            limit = self._feed_max.get(feed_title, self._default_max)
+            result.append((feed_title, articles[:limit]))
+        return result
+
+    # ------------------------------------------------------------------ #
+    #  CSS — identique a Le Monde, figcaption italic + petit              #
+    # ------------------------------------------------------------------ #
+    extra_css = '''
+        body { font-size: 1em; line-height: 1.4; margin: 0; padding: 0; }
+        h1, h1.calibre_title { font-size: 1.3em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.2em !important; margin-bottom: 0.5em !important; text-align: left !important; }
+        h2 { font-size: 1.1em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.8em !important; margin-bottom: 0.3em !important; text-align: left !important; }
+        h3 { font-size: 1.02em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.6em !important; margin-bottom: 0.2em !important; text-align: left !important; }
+        p { font-size: 0.95em; line-height: 1.4; text-align: justify; margin-top: 0; margin-bottom: 0.8em; }
+        img { display: block; margin: 0.4em auto; width: 80%; max-width: 100%; height: auto; }
+        p.nyt-caption, figcaption, .caption {
+            display: block;
+            margin-top: 0.2em;
+            margin-bottom: 1.5em;
+            font-size: 0.8em;
+            line-height: 1.25;
+            color: #555;
+            font-style: italic;
+            text-align: center;
+        }
+    '''
+
+    # ------------------------------------------------------------------ #
+    #  preprocess_html — lazy images uniquement (legendes deja faites)    #
+    # ------------------------------------------------------------------ #
+    def preprocess_html(self, soup):
+        for img in soup.find_all('img'):
+            if img.has_attr('data-src'):
+                img['src'] = img['data-src']
+            if img.has_attr('srcset'):
+                try:
+                    candidates = img['srcset'].split(',')
+                    url = candidates[-1].strip().split(' ')[0]
+                    if url.startswith('http'):
+                        img['src'] = url
+                except Exception:
+                    pass
+            for attr in ['srcset', 'data-srcset', 'data-src', 'loading']:
+                if img.has_attr(attr):
+                    del img[attr]
+        return soup

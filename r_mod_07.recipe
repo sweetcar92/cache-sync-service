@@ -1,0 +1,344 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+import os
+import json
+import re
+import urllib.request
+from datetime import date, datetime
+
+from calibre import random_user_agent
+from calibre.web.feeds.news import BasicNewsRecipe
+
+
+def classes(classes):
+    q = frozenset(classes.split(' '))
+    return dict(attrs={'class': lambda x: x and frozenset(x.split()).intersection(q)})
+
+
+class FeedMod07(BasicNewsRecipe):
+    title = 'The Guardian'
+    __author__ = 'The Guardian'
+    description = 'The Guardian & The Observer'
+    publisher = 'The Guardian'
+    publication_type = 'newspaper'
+    language = 'en_GB'
+    encoding = 'utf-8'
+
+    base_url = 'https://www.theguardian.com/uk'
+
+    timefmt = ' - %d/%m %Hh%M'
+    oldest_article = 1
+    max_articles_per_feed = 50
+    reverse_article_order = True
+    remove_javascript = True
+    remove_empty_feeds = True
+    no_stylesheets = True
+    remove_attributes = ['style', 'width', 'height']
+    ignore_duplicate_articles = {'title', 'url'}
+
+    compress_news_images = True
+    compress_news_images_auto_size = 2
+    compress_news_images_max_size = 20
+    scale_news_images_to_device = True
+    scale_news_images = (800, 600)
+
+    remove_tags = [
+        dict(attrs={'class': lambda x: x and '--twitter' in x}),
+        dict(attrs={'class': lambda x: x and 'submeta' in x.split()}),
+        dict(name='gu-island'),
+        dict(attrs={'data-component': ['share', 'social', 'nav', 'nav2', 'topbar']}),
+        dict(attrs={'data-link-name': 'block share'}),
+        dict(attrs={'data-print-layout': 'hide'}),
+        dict(attrs={'data-spacefinder-type': 'model.dotcomrendering.pageElements.NewsletterSignupBlockElement'}),
+        dict(id=['dfp-ad--survey', 'sub-nav-root', 'the-caption', 'bannerandheader']),
+        {'for': 'the-checkbox'},
+        dict(href=['#maincontent', '#navigation']),
+        dict(role=['navigation', 'button']),
+        dict(attrs={'class': lambda x: x and 'inline-expand-image' in x}),
+        dict(name='a', attrs={'aria-label': lambda x: x and 'Share On' in x}),
+        dict(name='a', attrs={'class': lambda x: x and 'social__action js-social__action--top' in x}),
+        dict(name='div', attrs={'id': 'share-count-root'}),
+        classes('badge-slot reveal-caption__checkbox mobile-only element-rich-link'),
+        dict(name=['link', 'meta', 'style', 'svg', 'input', 'source', 'noscript', 'button']),
+        dict(name='img', src=lambda x: x and 'https://sb.scorecardresearch.com/' in x),
+    ]
+
+
+
+    extra_css = '''
+        body { font-size: 1em; line-height: 1.4; margin: 0; padding: 0; }
+        h1, h1.calibre_title, .article-title, .title, header h1 { font-size: 1.3em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.2em !important; margin-bottom: 0.5em !important; text-align: left !important; }
+        h2, header h2 { font-size: 1.1em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.8em !important; margin-bottom: 0.3em !important; text-align: left !important; }
+        h3 { font-size: 1.02em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.6em !important; margin-bottom: 0.2em !important; text-align: left !important; }
+        p { font-size: 0.95em; line-height: 1.4; text-align: justify; margin-top: 0; margin-bottom: 0.8em; }
+        figure, div.figure { display: block !important; margin: 1.2em auto 2.2em auto !important; padding: 0 !important; text-align: center !important; clear: both !important; }
+        figure div { margin: 0; padding: 0; }
+        img { display: block; margin: 0.4em auto; width: 80%; max-width: 100%; height: auto; }
+        figcaption, figcaption p, .caption, .caption p, span.caption-text, div.element-image__caption, [data-component="caption"], [data-component="caption"] p, [data-component="caption"] span, .guardian-caption, .guardian-caption * { display: block !important; margin-top: 0.5em !important; margin-bottom: 2.2em !important; font-size: 0.78em !important; line-height: 1.35 !important; color: #555555 !important; font-style: italic !important; text-align: center !important; font-weight: normal !important; clear: both !important; }
+    '''
+
+    def get_browser(self, *a, **kw):
+        if not hasattr(self, 'non_ie_ua'):
+            try:
+                self.non_ie_ua = random_user_agent(allow_ie=False)
+            except TypeError:
+                self.non_ie_ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.111 Safari/537.36'
+        kw['user_agent'] = self.non_ie_ua
+        br = BasicNewsRecipe.get_browser(self, *a, **kw)
+        return br
+
+    def get_cover_url(self):
+        cover_url = None
+        try:
+            self.log('🔍 Recherche de la Une du jour sur frontpages.com (the-guardian)...')
+            page_url = 'https://www.frontpages.com/the-guardian/'
+            soup = self.index_to_soup(page_url)
+            html = str(soup)
+            matches = re.findall(r'/[a-z0-9]+/20\d{2}/\d{2}/\d{2}/[^\'"\s>]+\.(?:webp|jpg)', html)
+            paper_matches = [m for m in matches if 'the-guardian' in m and not any(x in m for x in ['sports', 'g2', 'review', 'saturday'])]
+            if not paper_matches:
+                paper_matches = [m for m in matches if 'the-guardian' in m]
+            if paper_matches:
+                raw_path = paper_matches[0]
+                clean_path = re.sub(r'^/(?:share|g|t)/', '/t/', raw_path)
+                clean_path = clean_path.replace('.webp.jpg', '@2x.webp')
+                if not clean_path.endswith('@2x.webp') and clean_path.endswith('.webp'):
+                    clean_path = clean_path.replace('.webp', '@2x.webp')
+                cover_url = 'https://www.frontpages.com' + clean_path
+                self.log(f'✅ Une frontpages.com trouvée : {cover_url}')
+        except Exception as e:
+            self.log(f'⚠️ Erreur couverture frontpages.com : {e}')
+
+        return cover_url
+
+    def download_cover(self):
+        try:
+            url = self.get_cover_url()
+            if url:
+                self.log(f'🔍 Téléchargement de la Une depuis {url}')
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Referer': 'https://www.frontpages.com/'
+                }
+                req = urllib.request.Request(url, headers=headers)
+                data = urllib.request.urlopen(req, timeout=15).read()
+
+                tmp = self.get_temp_files()[0]
+                with open(tmp, 'wb') as f:
+                    f.write(data)
+                self.log(f'✅ Couverture de Une enregistrée dans {tmp} ({len(data)} octets)')
+                return tmp
+        except Exception as e:
+            self.log(f'⚠️ Échec téléchargement Une frontpages.com : {e}')
+
+        # Fallback: Extract lead image from Guardian homepage and create custom cover
+        try:
+            self.log('🔍 Extraction de l\'image de Une principale depuis la page d\'accueil de The Guardian...')
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+            req_hp = urllib.request.Request(self.base_url, headers=headers)
+            html_hp = urllib.request.urlopen(req_hp).read().decode('utf-8', errors='ignore')
+
+            imgs = re.findall(r'https://i\.guim\.co\.uk/img/media/[^\'"\s>]+', html_hp)
+            clean_img_url = None
+            for img in imgs:
+                if 'master/' in img:
+                    clean_img_url = img.replace('&amp;', '&').replace('width=98', 'width=1000').replace('width=140', 'width=1000')
+                    break
+
+            if not clean_img_url and imgs:
+                clean_img_url = imgs[0].replace('&amp;', '&').replace('width=98', 'width=1000')
+
+            if clean_img_url:
+                self.log(f'🔍 Image de Une trouvée : {clean_img_url}')
+                req_img = urllib.request.Request(clean_img_url, headers=headers)
+                img_data = urllib.request.urlopen(req_img).read()
+
+                from io import BytesIO
+                from PIL import Image, ImageDraw
+                lead_im = Image.open(BytesIO(img_data)).convert('RGB')
+
+                canvas_w, canvas_h = 1200, 1600
+                canvas = Image.new('RGB', (canvas_w, canvas_h), color=(255, 255, 255))
+                draw = ImageDraw.Draw(canvas)
+
+                header_h = 220
+                draw.rectangle([0, 0, canvas_w, header_h], fill=(5, 41, 98))
+
+                img_w, img_h = lead_im.size
+                target_w = 1120
+                target_h = int(img_h * (target_w / img_w))
+                if target_h > 1300:
+                    target_h = 1300
+                    target_w = int(img_w * (target_h / img_h))
+
+                lead_im_resized = lead_im.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                offset_x = (canvas_w - target_w) // 2
+                offset_y = header_h + 30 + (1320 - target_h) // 2
+
+                canvas.paste(lead_im_resized, (offset_x, offset_y))
+                draw.rectangle([0, 0, canvas_w - 1, canvas_h - 1], outline=(5, 41, 98), width=8)
+
+                cover_file = os.path.join(self.output_dir, 'cover.jpg')
+                canvas.save(cover_file, 'JPEG', quality=95)
+
+                self.cover_path = cover_file
+                self.log(f'✅ Couverture personnalisée The Guardian enregistrée dans {cover_file}')
+                return True
+        except Exception as e:
+            self.log(f'⚠️ Erreur lors de la création de la couverture de fallback: {e}')
+
+        return False
+
+    def create_opf(self, *args, **kwargs):
+        opf_path = BasicNewsRecipe.create_opf(self, *args, **kwargs)
+        try:
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            days_fr = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche']
+            day_name = days_fr[datetime.now().weekday()]
+            series_idx = datetime.now().strftime('%Y%m%d%H%M')
+
+            content = re.sub(r'<dc:creator[^>]*>.*?</dc:creator>', f'<dc:creator opf:role="aut">{self.title}</dc:creator>', content, flags=re.DOTALL)
+            series_meta = f'<meta name="calibre:series" content="{self.title}"/>\n<meta name="calibre:series_index" content="{series_idx}"/>'
+            if '</metadata>' in content:
+                content = content.replace('</metadata>', f'{series_meta}\n</metadata>')
+
+            with open(opf_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            self.log(f'⚠️ OPF metadata update error: {e}')
+        return opf_path
+
+    def parse_section(self, section_url):
+        soup = self.index_to_soup(section_url)
+        for section in soup.findAll('section'):
+            articles = []
+            title = self.tag_to_string(section.find('h2'))
+            if not title:
+                continue
+
+            t_sec_lower = title.strip().lower()
+            if any(x in t_sec_lower for x in ['culture', 'art', 'sport', 'lifestyle', 'film', 'book', 'music', 'tv']):
+                self.log('Section ignorée (Culture/Sport):', title)
+                continue
+
+            self.log('Found section:', title)
+            for li in section.findAll('li'):
+                a = li.find('a', attrs={'href': True, 'aria-label': True})
+                if a:
+                    url = a['href']
+                    if url.startswith('/'):
+                        url = self.base_url.rpartition('/')[0] + url
+
+                    art_title = a['aria-label'].strip()
+                    t_upper = art_title.upper()
+                    u_lower = url.lower()
+
+                    # Filter static/info pages
+                    if any(x in u_lower for x in ['/info/', '/help/', '/about/', '/subscribe/', '/membership/', '/crosswords/', '/puzzles/']):
+                        self.log('Ignoré (Page statique/info):', art_title)
+                        continue
+
+                    # Filter out old articles (e.g. /2025/, /2024/, etc.)
+                    year_match = re.search(r'/(20\d{2})/', u_lower)
+                    if year_match and int(year_match.group(1)) < datetime.now().year:
+                        self.log(f'Ignoré (Article ancien {year_match.group(1)}):', art_title)
+                        continue
+
+                    if (
+                        t_upper.startswith(('EN DIRECT', 'DIRECT', '[EN DIRECT]', 'LIVE', 'LIVE BLOG', 'LIVE UPDATES')) or
+                        'EN DIRECT' in t_upper or 'LIVE BLOG' in t_upper or 'LIVE UPDATES' in t_upper or
+                        '/live/' in u_lower or '/en-direct/' in u_lower or 'direct-' in u_lower or '-live-' in u_lower
+                    ):
+                        self.log('Ignoré (LIVE/EN DIRECT):', art_title)
+                        continue
+
+                    self.log('\t', art_title, url)
+                    articles.append({'title': art_title, 'url': url})
+            if articles:
+                yield title, articles
+
+    def parse_index(self):
+        feeds = list(self.parse_section(self.base_url))
+        return feeds
+
+    def preprocess_html(self, soup):
+        # 1. Remove "View image in fullscreen" links
+        for a in list(soup.findAll('a')):
+            if 'view image in fullscreen' in a.text.strip().lower():
+                try:
+                    a.decompose()
+                except Exception:
+                    pass
+
+        # 2. Remove "Most viewed" sections
+        for tag in list(soup.findAll(['section', 'aside', 'gu-island', 'div'], attrs={'data-component': lambda x: x and any(k in str(x).lower() for k in ['most-viewed', 'mostviewed', 'related', 'right-column', 'on-ward', 'onward'])})):
+            try:
+                tag.decompose()
+            except Exception:
+                pass
+
+        for h in list(soup.findAll(['h2', 'h3', 'div', 'section', 'aside'])):
+            if h.text.strip().lower() == 'most viewed':
+                try:
+                    p_box = h.find_parent(['section', 'aside', 'gu-island'])
+                    if p_box and len(p_box.text.strip()) < 3000:
+                        p_box.decompose()
+                    else:
+                        h.decompose()
+                except Exception:
+                    pass
+
+        # 3. Remove "First published on..." datelines
+        for tag in list(soup.findAll(['p', 'div', 'span', 'summary', 'time'])):
+            t_text = tag.text.strip().lower()
+            if t_text.startswith('first published') or 'first published on' in t_text:
+                if len(t_text) < 300:
+                    try:
+                        tag.decompose()
+                    except Exception:
+                        pass
+
+        # 4. Remove "Prefer the Guardian on Google"
+        for tag in list(soup.findAll(['p', 'div', 'span', 'a'])):
+            t_text = tag.text.strip().lower()
+            if 'prefer the guardian' in t_text or 'prefer the observer' in t_text:
+                if len(t_text) < 300:
+                    try:
+                        tag.decompose()
+                    except Exception:
+                        pass
+
+        for table in soup.findAll('table'):
+            if len(table.findAll('tr')) > 20:
+                table.decompose()
+        for dateline in soup.findAll(attrs={'data-gu-name': 'dateline'}):
+            for s in dateline.findAll('summary'):
+                s.extract()
+            dateline.name = 'div'
+
+        # 5. Clean and format image captions
+        for cap in soup.findAll(['figcaption', 'aside'], attrs={'class': lambda x: x and any(c in str(x).lower() for c in ['caption', 'element-image'])}):
+            cap_text = cap.text.strip()
+            for prefix in ['Image caption,', 'Figure caption,', 'Photograph:']:
+                if cap_text.startswith(prefix):
+                    cap_text = cap_text[len(prefix):].strip()
+            cap.string = cap_text
+            cap.name = 'figcaption'
+            cap['class'] = 'guardian-caption'
+            cap['style'] = 'display: block !important; margin-top: 0.5em !important; margin-bottom: 2.2em !important; font-size: 0.78em !important; font-style: italic !important; color: #555555 !important; text-align: center !important; font-weight: normal !important; clear: both !important;'
+
+        for cap in soup.findAll(['figcaption', 'span', 'div'], attrs={'data-spacefinder-role': 'inline'}):
+            cap_text = cap.text.strip()
+            for prefix in ['Image caption,', 'Figure caption,', 'Photograph:']:
+                if cap_text.startswith(prefix):
+                    cap_text = cap_text[len(prefix):].strip()
+            cap.string = cap_text
+            cap.name = 'figcaption'
+            cap['class'] = 'guardian-caption'
+            cap['style'] = 'display: block !important; margin-top: 0.5em !important; margin-bottom: 2.2em !important; font-size: 0.78em !important; font-style: italic !important; color: #555555 !important; text-align: center !important; font-weight: normal !important; clear: both !important;'
+
+        return soup

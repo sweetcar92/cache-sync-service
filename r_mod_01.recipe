@@ -1,0 +1,248 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+from __future__ import absolute_import, division, print_function, unicode_literals
+
+import os
+import json
+import re
+import urllib.request
+from datetime import date, datetime
+
+from calibre.web.feeds.news import BasicNewsRecipe
+
+
+class FeedMod01(BasicNewsRecipe):
+    title = 'Le Monde'
+    __author__ = 'Le Monde'
+    description = 'Data feed 01'
+    publisher = 'Le Monde'
+    publication_type = 'newspaper'
+    language = 'fr'
+    encoding = 'utf-8'
+
+    timefmt = ' - %d/%m %Hh%M'
+    oldest_article = 1
+    no_stylesheets = True
+    remove_attributes = ['style', 'height', 'width']
+    ignore_duplicate_articles = {'title', 'url'}
+    reverse_article_order = True
+    remove_empty_feeds = True
+
+    auto_cleanup = False
+    delay = 1
+
+    compress_news_images = True
+    compress_news_images_auto_size = 2
+    compress_news_images_max_size = 20
+    scale_news_images_to_device = True
+    scale_news_images = (800, 600)
+
+    browser_user_agent = 'LeMonde/9.20.1 (Android; 14)'
+
+    def get_browser(self, *args, **kwargs):
+        br = BasicNewsRecipe.get_browser(self, *args, **kwargs)
+        br.addheaders = [
+            ('User-Agent', self.browser_user_agent),
+            ('X-Lmd-Token', 'TWPLMOLMO'),
+            ('Accept', 'application/json')
+        ]
+        return br
+
+    def get_article_url(self, article):
+        url = BasicNewsRecipe.get_article_url(self, article)
+        match = re.search(r'_(\d+)_\d+\.html', url)
+        if match:
+            article_id = match.group(1)
+            return f'https://apps.lemonde.fr/aec/v1/premium-android-phone/article/{article_id}'
+        return url
+
+    def preprocess_raw_html(self, raw_html, url):
+        if '/aec/v1/' in url:
+            try:
+                data = json.loads(raw_html)
+                # Skip live blog templates
+                if data.get('type') in ['live', 'liveblog'] or data.get('template') in ['live', 'liveblog'] or 'en direct' in data.get('template_vars', {}).get('seo_title', '').lower():
+                    return '<html><body></body></html>'
+                content = data['template_vars']['content']
+                title = data['template_vars'].get('seo_title', 'Le Monde')
+                content = content.replace('%7B%7Bwidth%7D%7D', '1000').replace('{{width}}', '1000')
+                content = content.replace('%7B%7Bheight%7D%7D', '600').replace('{{height}}', '600')
+                return f'<html><head><title>{title}</title></head><body>{content}</body></html>'
+            except Exception:
+                return raw_html
+        return raw_html
+
+    def get_cover_url(self):
+        cover_url = None
+        try:
+            self.log('🔍 Recherche de la Une du jour sur frontpages.com (le-monde)...')
+            page_url = 'https://www.frontpages.com/le-monde/'
+            soup = self.index_to_soup(page_url)
+            html = str(soup)
+            matches = re.findall(r'/[a-z0-9]+/20\d{2}/\d{2}/\d{2}/[^\'"\s>]+\.(?:webp|jpg)', html)
+            paper_matches = [m for m in matches if 'le-monde' in m and not any(x in m for x in ['sports', 'des-livres', 'economie', 'diplomatique'])]
+            if not paper_matches:
+                paper_matches = [m for m in matches if 'le-monde' in m]
+            if paper_matches:
+                raw_path = paper_matches[0]
+                clean_path = re.sub(r'^/(?:share|g|t)/', '/t/', raw_path)
+                clean_path = clean_path.replace('.webp.jpg', '@2x.webp')
+                if not clean_path.endswith('@2x.webp') and clean_path.endswith('.webp'):
+                    clean_path = clean_path.replace('.webp', '@2x.webp')
+                cover_url = 'https://www.frontpages.com' + clean_path
+                self.log(f'✅ Une frontpages.com trouvée : {cover_url}')
+        except Exception as e:
+            self.log(f'⚠️ Erreur couverture frontpages.com : {e}')
+
+        if not cover_url:
+            cover_id = date.today().strftime('%Y%m%d')
+            cover_url = 'https://www.lemonde.fr/thumbnail/journal/' + cover_id + '/1000/1490'
+
+        return cover_url
+
+    def download_cover(self):
+        try:
+            url = self.get_cover_url()
+            if not url:
+                return False
+            self.log(f'🔍 Téléchargement de la Une depuis {url}')
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://www.frontpages.com/'
+            }
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                data = urllib.request.urlopen(req).read()
+            except Exception as e:
+                if '@2x.webp' in url:
+                    url_1x = url.replace('@2x.webp', '.webp')
+                    req = urllib.request.Request(url_1x, headers=headers)
+                    data = urllib.request.urlopen(req).read()
+                else:
+                    raise e
+
+            from io import BytesIO
+            from PIL import Image
+            im = Image.open(BytesIO(data))
+            if im.mode != 'RGB':
+                im = im.convert('RGB')
+
+            cover_file = os.path.join(self.output_dir, 'cover.jpg')
+            with open(cover_file, 'wb') as f:
+                im.save(f, format='JPEG', quality=95)
+
+            self.cover_path = cover_file
+            self.log(f'✅ Couverture de Une enregistrée dans {cover_file} ({len(data)} octets)')
+            return True
+        except Exception as e:
+            self.log(f'⚠️ Erreur lors du téléchargement de la couverture : {e}')
+            return False
+
+    def create_opf(self, *args, **kwargs):
+        opf_path = BasicNewsRecipe.create_opf(self, *args, **kwargs)
+        try:
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            days_fr = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche']
+            day_name = days_fr[datetime.now().weekday()]
+            series_idx = datetime.now().strftime('%Y%m%d%H%M')
+
+            content = re.sub(r'<dc:creator[^>]*>.*?</dc:creator>', f'<dc:creator opf:role="aut">{day_name}</dc:creator>', content, flags=re.DOTALL)
+            series_meta = f'<meta name="calibre:series" content="{self.title}"/>\n<meta name="calibre:series_index" content="{series_idx}"/>'
+            if '</metadata>' in content:
+                content = content.replace('</metadata>', f'{series_meta}\n</metadata>')
+
+            with open(opf_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            self.log(f'⚠️ OPF metadata update error: {e}')
+        return opf_path
+
+    keep_only_tags = [
+        dict(name='h1', attrs={'class': ['heading', 'article__title']}),
+        dict(name='div', attrs={'class': ['kicker', 'article__desc']}),
+        dict(name='div', attrs={'class': ['article_content', 'article__content']}),
+        dict(name='figure')
+    ]
+
+    remove_tags = [
+        dict(name='div', attrs={'class': [
+            'see-also-container', 'inread-container', 'premium-container',
+            'restricted-reading', 'offer-container', 'authors-container',
+            'js-init-line-clamp', 'bloc-reactions', 'meta__publisher'
+        ]}),
+        dict(name=['aside', 'footer', 'button', 'svg', 'script', 'style', 'video'])
+    ]
+
+    extra_css = '''
+        body { font-size: 1em; line-height: 1.4; margin: 0; padding: 0; }
+        h1, h1.calibre_title, .heading, .article__title { font-size: 1.3em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.2em !important; margin-bottom: 0.5em !important; text-align: left !important; }
+        h2 { font-size: 1.1em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.8em !important; margin-bottom: 0.3em !important; text-align: left !important; }
+        h3 { font-size: 1.02em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.6em !important; margin-bottom: 0.2em !important; text-align: left !important; }
+        .kicker, .article__desc { font-size: 0.95em; font-style: italic; font-weight: bold; color: #333; margin-bottom: 1em; }
+        p { font-size: 0.95em; line-height: 1.4; text-align: justify; margin-top: 0; margin-bottom: 0.8em; }
+        figure, div.figure { margin: 0.6em 0; padding: 0; text-align: center; }
+        figure div, figure p { margin: 0; padding: 0; }
+        img { display: block; margin: 0.4em auto; width: 80%; max-width: 100%; height: auto; }
+        figcaption, .caption { display: block; margin-top: 0.2em; font-size: 0.8em; line-height: 1.25; color: #555; font-style: italic; text-align: center; }
+    '''
+
+    def parse_index(self):
+        feeds = BasicNewsRecipe.parse_index(self)
+        filtered_feeds = []
+        for feed_title, articles in feeds:
+            valid_articles = []
+            for a in articles:
+                title = a.get('title', '').strip()
+                url = a.get('url', '').strip().lower()
+                t_upper = title.upper().replace('\xa0', ' ')
+                
+                is_live = bool(
+                    re.search(r'\b(EN\s+DIRECT|EN-DIRECT|LIVE)\b', t_upper) or
+                    re.search(r'^(DIRECT\b|\bDIRECT\s*:)', t_upper) or
+                    '/live/' in url or '/en-direct/' in url or 'en-direct' in url or '-live-' in url or '_live_' in url
+                )
+                
+                if is_live:
+                    self.report_progress(0, f"Ignoré (EN DIRECT): {title}")
+                    continue
+                valid_articles.append(a)
+            if valid_articles:
+                filtered_feeds.append((feed_title, valid_articles))
+        return filtered_feeds
+
+    def preprocess_html(self, soup):
+        for tag in soup.find_all(['img', 'figure', 'picture', 'div', 'p', 'span']):
+            for attr in ['width', 'height', 'style', 'aspect-ratio']:
+                if tag.has_attr(attr):
+                    del tag[attr]
+
+        for img in soup.find_all('img'):
+            if img.has_attr('data-src'):
+                img['src'] = img['data-src']
+
+            if img.has_attr('srcset'):
+                try:
+                    candidates = img['srcset'].split(',')
+                    url = candidates[-1].strip().split(' ')[0]
+                    if url.startswith('http'):
+                        img['src'] = url
+                except Exception:
+                    pass
+
+            for attr in ['srcset', 'data-srcset', 'data-src', 'loading']:
+                if img.has_attr(attr):
+                    del img[attr]
+
+        return soup
+
+    feeds = [
+        ('À la une', 'https://www.lemonde.fr/rss/une.xml'),
+        ('Politique', 'https://www.lemonde.fr/politique/rss_full.xml'),
+        ('International', 'https://www.lemonde.fr/international/rss_full.xml'),
+        ('Société', 'https://www.lemonde.fr/societe/rss_full.xml'),
+        ('Économie', 'https://www.lemonde.fr/economie/rss_full.xml'),
+        ('Planète', 'https://www.lemonde.fr/planete/rss_full.xml'),
+        ('Idées', 'https://www.lemonde.fr/idees/rss_full.xml')
+    ]

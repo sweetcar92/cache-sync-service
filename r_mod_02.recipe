@@ -1,0 +1,263 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+from __future__ import absolute_import, division, print_function, unicode_literals
+
+import os
+import json
+import re
+import urllib.request
+from datetime import date, datetime
+
+from calibre.web.feeds.news import BasicNewsRecipe
+
+
+class FeedMod02(BasicNewsRecipe):
+    title = 'Le Parisien'
+    __author__ = 'Le Parisien'
+    description = 'Data feed 02'
+    publisher = 'Le Parisien'
+    language = 'fr'
+    encoding = 'utf-8'
+
+    timefmt = ' - %d/%m %Hh%M'
+    oldest_article = 2
+    max_articles_per_feed = 50
+    no_stylesheets = True
+    remove_attributes = ['style', 'height', 'width']
+    ignore_duplicate_articles = {'title', 'url'}
+
+    compress_news_images = True
+    compress_news_images_auto_size = 2
+    compress_news_images_max_size = 20
+    scale_news_images_to_device = True
+    scale_news_images = (800, 600)
+
+    headers = {
+        'User-Agent': 'LeParisien/11.0.1 (Android 14)',
+        'Accept': 'application/json',
+    }
+
+    extra_css = '''
+        body { font-size: 1em; line-height: 1.4; margin: 0; padding: 0; }
+        h1, h1.calibre_title, #main-title { font-size: 1.3em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.2em !important; margin-bottom: 0.5em !important; text-align: left !important; }
+        h2 { font-size: 1.1em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.8em !important; margin-bottom: 0.3em !important; text-align: left !important; }
+        h3 { font-size: 1.02em !important; font-weight: bold !important; line-height: 1.25 !important; margin-top: 0.6em !important; margin-bottom: 0.2em !important; text-align: left !important; }
+        p { font-size: 0.95em; line-height: 1.4; text-align: justify; margin-top: 0; margin-bottom: 0.8em; }
+        figure, div.figure { margin: 0.6em 0; padding: 0; text-align: center; }
+        figure div, figure p { margin: 0; padding: 0; }
+        img { display: block; margin: 0.4em auto; width: 80%; max-width: 100%; height: auto; }
+        figcaption, .caption { display: block; margin-top: 0.2em; font-size: 0.8em; line-height: 1.25; color: #555; font-style: italic; text-align: center; }
+    '''
+
+    def parse_index(self):
+        feeds = BasicNewsRecipe.parse_index(self)
+        filtered_feeds = []
+        for feed_title, articles in feeds:
+            valid_articles = []
+            for a in articles:
+                title = a.get('title', '').strip()
+                url = a.get('url', '').strip().lower()
+                t_upper = title.upper()
+                if (
+                    t_upper.startswith(('EN DIRECT', 'DIRECT', '[EN DIRECT]', 'LIVE', 'EN DIRECT :', 'DIRECT :')) or
+                    'EN DIRECT' in t_upper or 'DIRECT :' in t_upper or 'EN-DIRECT' in t_upper or
+                    '/live/' in url or '/en-direct/' in url or 'direct-' in url or 'en-direct-' in url
+                ):
+                    self.report_progress(0, f"Ignoré (EN DIRECT): {title}")
+                    continue
+                valid_articles.append(a)
+            if valid_articles:
+                filtered_feeds.append((feed_title, valid_articles))
+        return filtered_feeds
+
+    def get_browser(self, *args, **kwargs):
+        br = BasicNewsRecipe.get_browser(self, *args, **kwargs)
+        for name, val in self.headers.items():
+            br.addheaders.append((name, val))
+        return br
+
+    def get_cover_url(self):
+        cover_url = None
+        try:
+            self.log('🔍 Recherche de la Une du jour sur frontpages.com (le-parisien)...')
+            page_url = 'https://www.frontpages.com/le-parisien/'
+            soup = self.index_to_soup(page_url)
+            html = str(soup)
+            matches = re.findall(r'/[a-z0-9]+/20\d{2}/\d{2}/\d{2}/[^\'"\s>]+\.(?:webp|jpg)', html)
+            paper_matches = [m for m in matches if 'le-parisien' in m and not any(x in m for x in ['economie', 'sports'])]
+            if not paper_matches:
+                paper_matches = [m for m in matches if 'le-parisien' in m]
+            if paper_matches:
+                raw_path = paper_matches[0]
+                clean_path = re.sub(r'^/(?:share|g|t)/', '/t/', raw_path)
+                clean_path = clean_path.replace('.webp.jpg', '@2x.webp')
+                if not clean_path.endswith('@2x.webp') and clean_path.endswith('.webp'):
+                    clean_path = clean_path.replace('.webp', '@2x.webp')
+                cover_url = 'https://www.frontpages.com' + clean_path
+                self.log(f'✅ Une frontpages.com trouvée : {cover_url}')
+        except Exception as e:
+            self.log(f'⚠️ Erreur couverture frontpages.com : {e}')
+
+        if not cover_url:
+            try:
+                soup = self.index_to_soup('https://www.kiosque.leparisien.fr/')
+                img = soup.find('img', class_=re.compile(r'main-image', re.I))
+                if img and img.has_attr('src'):
+                    url = img['src']
+                    if url.startswith('//'):
+                        url = 'https:' + url
+                    cover_url = url.replace('-MEDIUM-', '-LARGE-')
+            except Exception:
+                pass
+
+        return cover_url
+
+    def download_cover(self):
+        try:
+            url = self.get_cover_url()
+            if not url:
+                return False
+            self.log(f'🔍 Téléchargement de la Une depuis {url}')
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://www.frontpages.com/'
+            }
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                data = urllib.request.urlopen(req).read()
+            except Exception as e:
+                if '@2x.webp' in url:
+                    url_1x = url.replace('@2x.webp', '.webp')
+                    req = urllib.request.Request(url_1x, headers=headers)
+                    data = urllib.request.urlopen(req).read()
+                else:
+                    raise e
+
+            from io import BytesIO
+            from PIL import Image
+            im = Image.open(BytesIO(data))
+            if im.mode != 'RGB':
+                im = im.convert('RGB')
+
+            cover_file = os.path.join(self.output_dir, 'cover.jpg')
+            with open(cover_file, 'wb') as f:
+                im.save(f, format='JPEG', quality=95)
+
+            self.cover_path = cover_file
+            self.log(f'✅ Couverture de Une enregistrée dans {cover_file} ({len(data)} octets)')
+            return True
+        except Exception as e:
+            self.log(f'⚠️ Erreur lors du téléchargement de la couverture : {e}')
+            return False
+
+    def create_opf(self, *args, **kwargs):
+        opf_path = BasicNewsRecipe.create_opf(self, *args, **kwargs)
+        try:
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            days_fr = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche']
+            day_name = days_fr[datetime.now().weekday()]
+            series_idx = datetime.now().strftime('%Y%m%d%H%M')
+
+            content = re.sub(r'<dc:creator[^>]*>.*?</dc:creator>', f'<dc:creator opf:role="aut">{day_name}</dc:creator>', content, flags=re.DOTALL)
+            series_meta = f'<meta name="calibre:series" content="{self.title}"/>\n<meta name="calibre:series_index" content="{series_idx}"/>'
+            if '</metadata>' in content:
+                content = content.replace('</metadata>', f'{series_meta}\n</metadata>')
+
+            with open(opf_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            self.log(f'⚠️ OPF metadata update error: {e}')
+        return opf_path
+
+    def get_article_url(self, article):
+        url = article.get('link', article.get('url', ''))
+        match = re.search(r'-([A-Z0-9]{20,})\.php$', url)
+        if match:
+            article_id = match.group(1)
+            return f'https://gateway-api.leparisien.fr/v1/contents/articles/{article_id}'
+        return url
+
+    def preprocess_raw_html(self, raw_html, url):
+        if '/v1/contents/articles/' in url:
+            try:
+                data = json.loads(raw_html)
+                story = data.get('story', {})
+
+                title = story.get('headlines', {}).get('basic', 'Le Parisien')
+                lead = story.get('subheadlines', {}).get('basic', '')
+                main_img = story.get('promo_items', {}).get('basic', {}).get('url', '')
+                content = story.get('bodyContent', '')
+
+                html = f'<html><head><title>{title}</title></head><body>'
+                html += f'<h1 id="main-title" style="text-align:center">{title}</h1>'
+                if lead:
+                    html += f'<p style="font-weight:bold; font-style:italic">{lead}</p>'
+                if main_img:
+                    html += f'<div style="text-align:center"><img src="{main_img}"></div>'
+
+                html += content
+                html += '</body></html>'
+                return html
+            except Exception as e:
+                self.log(f'Erreur JSON : {e}')
+                return raw_html
+        return raw_html
+
+    def preprocess_html(self, soup):
+        for h1 in soup.find_all('h1'):
+            if h1.get('id') != 'main-title':
+                h1.decompose()
+
+        for tag in soup.find_all(['p', 'div', 'span', 'b']):
+            text = tag.get_text().strip()
+            if re.match(r'^(À lire aussi|Vidéo|PODCAST\.|Direct|Inédit|Replay)', text, re.IGNORECASE):
+                tag.decompose()
+            if text in ['•', '·']:
+                tag.decompose()
+
+        for a in soup.find_all('a'):
+            a.unwrap()
+
+        for tag in soup.find_all(['iframe', 'script', 'noscript']):
+            tag.decompose()
+
+        return soup
+
+    def parse_index(self):
+        feeds = BasicNewsRecipe.parse_index(self)
+        filtered_feeds = []
+        for feed_title, articles in feeds:
+            valid_articles = []
+            for a in articles:
+                title = a.get('title', '').strip()
+                t_upper = title.upper()
+                if t_upper.startswith(('EN DIRECT', 'DIRECT', '[EN DIRECT]', 'LIVE')) or 'EN DIRECT' in t_upper or 'DIRECT :' in t_upper:
+                    self.log(f"Ignoré (EN DIRECT): {title}")
+                    continue
+                valid_articles.append(a)
+            if valid_articles:
+                filtered_feeds.append((feed_title, valid_articles))
+        return filtered_feeds
+
+    feeds = [
+        ('À la une', 'https://feeds.leparisien.fr/leparisien/rss'),
+        ('Politique', 'https://feeds.leparisien.fr/leparisien/rss/politique'),
+        ('Société', 'https://feeds.leparisien.fr/leparisien/rss/societe'),
+        ('International', 'https://feeds.leparisien.fr/leparisien/rss/international'),
+        ('Économie', 'https://feeds.leparisien.fr/leparisien/rss/economie'),
+        ('Faits divers', 'https://feeds.leparisien.fr/leparisien/rss/faits-divers'),
+    ]
+
+    extra_css = '''
+        body { font-size: 1em; line-height: 1.4; margin: 0; padding: 0; }
+        h1, h1.calibre_title, #main-title { font-size: 1.2em !important; font-weight: bold; line-height: 1.2; margin-top: 0.2em; margin-bottom: 0.6em; text-align: left; }
+        h2 { font-size: 1.1em; font-weight: bold; margin-top: 0.9em; margin-bottom: 0.4em; }
+        h3 { font-size: 1.05em; font-weight: bold; margin-top: 0.8em; margin-bottom: 0.4em; }
+        p, p.paragraph { font-size: 0.95em; line-height: 1.4; text-align: justify; margin-top: 0; margin-bottom: 0.8em; }
+        figure, div.figure { margin: 0.6em 0; padding: 0; text-align: center; }
+        figure div, figure p { margin: 0; padding: 0; }
+        img { display: block; margin: 0.4em auto; width: 80%; max-width: 100%; height: auto; }
+        figcaption, .caption { display: block; margin-top: 0.2em; font-size: 0.8em; line-height: 1.25; color: #555; font-style: italic; text-align: center; }
+    '''
