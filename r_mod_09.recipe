@@ -56,7 +56,7 @@ class FeedMod09(BasicNewsRecipe):
     _use_backup_key = False   # bascule si quota primaire epuise
 
     def _zenrows_url(self, key, encoded_url):
-        return f'https://api.zenrows.com/v1/?apikey={key}&url={encoded_url}&js_render=true&premium_proxy=true'
+        return f'https://api.zenrows.com/v1/?apikey={key}&url={encoded_url}'
 
     def _scrapeops_url(self, key, encoded_url):
         return f'https://proxy.scrapeops.io/v1/?api_key={key}&url={encoded_url}&residential=true'
