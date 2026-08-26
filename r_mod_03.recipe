@@ -141,10 +141,11 @@ class FeedMod03(BasicNewsRecipe):
         import xml.etree.ElementTree as ET
 
         parsed_feeds = []
+        headers = {'Referer': 'https://www.google.com/'}
         for feed_title, feed_url in self.feeds:
             self.report_progress(0, f"Fetching feed: {feed_title} via curl_cffi...")
             try:
-                r = requests.get(feed_url, impersonate="chrome120", timeout=15)
+                r = requests.get(feed_url, impersonate="safari15_5", headers=headers, timeout=15)
                 if r.status_code != 200:
                     self.report_progress(0, f"Failed to fetch feed {feed_title}: status {r.status_code}")
                     continue
@@ -201,7 +202,8 @@ class FeedMod03(BasicNewsRecipe):
         article_file = os.path.join(dir_, 'index.html')
 
         try:
-            r = requests.get(url, impersonate="chrome120", timeout=15)
+            headers = {'Referer': 'https://www.google.com/'}
+            r = requests.get(url, impersonate="safari15_5", headers=headers, timeout=15)
             if r.status_code != 200:
                 self.report_progress(0, f"Failed to download article {url} (HTTP {r.status_code})")
                 return BasicNewsRecipe._fetch_article(self, url, dir_, f, a, num_of_feeds, preloaded)

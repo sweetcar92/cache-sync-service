@@ -55,7 +55,7 @@ class FeedMod09(BasicNewsRecipe):
     _use_backup_key = False   # bascule si quota primaire epuise
 
     def _scrapeops_url(self, key, encoded_url):
-        return f'https://proxy.scrapeops.io/v1/?api_key={key}&url={encoded_url}'
+        return f'https://proxy.scrapeops.io/v1/?api_key={key}&url={encoded_url}&residential=true'
 
     def get_article_url(self, article):
         url = BasicNewsRecipe.get_article_url(self, article)
@@ -77,7 +77,7 @@ class FeedMod09(BasicNewsRecipe):
         error_keywords = [
             'quota', 'exceeded', 'unauthorized', 'forbidden', 'limit reached',
             'api_key', 'account quota', 'credit limit', '429 too many', '403 forbidden',
-            '422 unprocessable'
+            '422 unprocessable', 'please enable js'
         ]
         if any(kw in html_lower for kw in error_keywords) and len(raw_html) < 4000:
             return True
@@ -95,7 +95,8 @@ class FeedMod09(BasicNewsRecipe):
 
         # Detection quota / reponse vide ou en erreur
         if self._is_invalid_or_quota_error(raw_html):
-            self.log(f'⚠️ Warning: Reponse invalide/vide ou quota depasse pour {clean_url[:80]} (taille: {len(raw_html)} octets)')
+            snippet = raw_html[:250].replace('\n', ' ').strip()
+            self.log(f'⚠️ Warning: Reponse ScrapeOps invalide/erreur pour {clean_url[:80]} (taille: {len(raw_html)} octets). Apercu: {snippet}')
 
             if not FeedMod09._use_backup_key and self.scrapeops_key_backup:
                 self.log('🔄 Bascule automatique de la classe sur la cle ScrapeOps backup...')
