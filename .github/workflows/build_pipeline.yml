@@ -88,6 +88,7 @@ jobs:
           IS_AFTERNOON=$(python -c "import datetime; from zoneinfo import ZoneInfo; h = datetime.datetime.now(ZoneInfo('Europe/Paris')).hour; print('true' if 14 <= h <= 23 else 'false')")
           if [ "$IS_AFTERNOON" = "true" ]; then
             echo "=== Génération The New York Times (Édition de l'après-midi) ==="
+            ZENROWS_KEY="${{ secrets.ZENROWS_KEY }}" \
             SCRAPEOPS_KEY="${{ secrets.SCRAPEOPS_KEY }}" \
             SCRAPEOPS_KEY_BACKUP="${{ secrets.SCRAPEOPS_KEY_BACKUP }}" \
             ebook-convert r_mod_09.recipe "The_New_York_Times_${DATE_FILE}.epub" --no-svg-cover || echo "⚠️ The New York Times failed"

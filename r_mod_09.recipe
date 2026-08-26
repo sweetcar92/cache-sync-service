@@ -40,6 +40,7 @@ class FeedMod09(BasicNewsRecipe):
     scale_news_images_to_device = True
     scale_news_images = (800, 600)
 
+    zenrows_key          = os.environ.get('ZENROWS_KEY', '')
     scrapeops_key        = os.environ.get('SCRAPEOPS_KEY', '')
     scrapeops_key_backup = os.environ.get('SCRAPEOPS_KEY_BACKUP', '')
 
@@ -50,9 +51,12 @@ class FeedMod09(BasicNewsRecipe):
     _default_max = 5
 
     # ------------------------------------------------------------------ #
-    #  Proxy routing — primary ScrapeOps key, backup sur quota depasse    #
+    #  Proxy routing — ZenRows en priorité, ScrapeOps en fallback        #
     # ------------------------------------------------------------------ #
     _use_backup_key = False   # bascule si quota primaire epuise
+
+    def _zenrows_url(self, key, encoded_url):
+        return f'https://api.zenrows.com/v1/?apikey={key}&url={encoded_url}&js_render=true&premium_proxy=true'
 
     def _scrapeops_url(self, key, encoded_url):
         return f'https://proxy.scrapeops.io/v1/?api_key={key}&url={encoded_url}&residential=true'
@@ -62,6 +66,8 @@ class FeedMod09(BasicNewsRecipe):
         clean_url = url.split('?')[0]
         encoded_url = urllib.parse.quote(clean_url, safe='')
 
+        if self.zenrows_key:
+            return self._zenrows_url(self.zenrows_key, encoded_url)
         if self._use_backup_key and self.scrapeops_key_backup:
             return self._scrapeops_url(self.scrapeops_key_backup, encoded_url)
         if self.scrapeops_key:
