@@ -90,6 +90,31 @@ def update_epub_metadata(epub_path, series_name):
     os.replace(temp_epub, epub_path)
     print(f"SUCCESS: Successfully updated metadata and Kobo cover manifest for {os.path.basename(epub_path)}")
 
+SERIES_MAPPING = {
+    'Le_Monde': 'Le Monde',
+    'Le_Parisien': 'Le Parisien',
+    'Les_Echos': 'Les Echos',
+    'Le_Figaro': 'Le Figaro',
+    'Washington_Post': 'The Washington Post',
+    'Courrier_International': 'Courrier International',
+    'The_Guardian': 'The Guardian',
+    'BBC_News': 'BBC News',
+    'The_New_York_Times': 'The New York Times'
+}
+
+def detect_series_name(file_path):
+    base = os.path.basename(file_path)
+    for prefix, name in SERIES_MAPPING.items():
+        if base.startswith(prefix):
+            return name
+    match = re.match(r'^(.+?)_\d{4}-\d{2}-\d{2}_', base)
+    if match:
+        return match.group(1).replace('_', ' ')
+    return base.split('.')[0]
+
 if __name__ == '__main__':
     if len(sys.argv) > 2:
         update_epub_metadata(sys.argv[1], sys.argv[2])
+    elif len(sys.argv) > 1:
+        series = detect_series_name(sys.argv[1])
+        update_epub_metadata(sys.argv[1], series)
